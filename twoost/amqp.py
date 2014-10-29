@@ -8,7 +8,6 @@ Simple Twisted-style abstraction around AMQP pika library.
 
 import pickle
 import json
-import random
 import functools
 
 import zope.interface
@@ -51,19 +50,43 @@ class IAMQPSchema(zope.interface.Interface):
 class IAMQPSchemaBuilder(zope.interface.Interface):
 
     def declareQueue(
-            queue, passive=False, durable=False,
-            exclusive=False, auto_delete=False, arguments=None):
+            queue,
+            dead_letter_exchange=None,
+            dead_letter_exchange_rk=None,
+            passive=False,
+            durable=False,
+            exclusive=False,
+            auto_delete=False,
+            message_ttl=None,
+            arguments=None,
+    ):
         pass
 
     def declareExchange(
-            exchange, exchange_type='direct', passive=False,
-            durable=False, auto_delete=False, internal=False, arguments=None):
+            exchange,
+            exchange_type='direct',
+            passive=False,
+            durable=False,
+            auto_delete=False,
+            internal=False,
+            arguments=None,
+    ):
         pass
 
-    def bindQueue(queue, exchange, routing_key='', arguments=None):
+    def bindQueue(
+            queue,
+            exchange,
+            routing_key='',
+            arguments=None,
+    ):
         pass
 
-    def bindExchange(destination, source, routing_key='', arguments=None):
+    def bindExchange(
+            destination,
+            source,
+            routing_key='',
+            arguments=None,
+    ):
         pass
 
 
@@ -140,14 +163,12 @@ class _SchemaBuilderProxy(components.proxyForInterface(IAMQPSchemaBuilder)):
 
 class _AMQPProtocol(TwistedProtocolConnection, object):
 
-    DELAYED_REJECTIONS_LIMIT = 5000
+    delayed_rejections_limit = 10000
 
     def __init__(
             self, parameters,
             schema=None,
             prefetch_count=None,
-            message_rejection_delay=120,
-            preserve_double_redelivery=True,
     ):
 
         logger.debug("construct new _AMQPProtocol (id = %r)...", id(self))
@@ -156,8 +177,6 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
 
         self.schema = schema
         self.prefetch_count = prefetch_count
-        self.message_rejection_delay = message_rejection_delay
-        self.preserve_double_redelivery = preserve_double_redelivery
 
         self._on_handshaking_made = defer.Deferred()
 
@@ -296,6 +315,7 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
 
     def publishMessage(
             self, exchange, routing_key, body,
+            message_ttl=None,
             content_type=None, properties=None, confirm=True):
 
         if not self.ready_for_publish:
@@ -308,6 +328,8 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
         p = _BasicProperties(**(properties or {}))
         if content_type:
             p.content_type = content_type
+        if message_ttl is not None:
+            p.expiration = str(int(message_ttl))
 
         if confirm and self._safewrite_channel is not None:
             self._publish_delivery_tag_counter += 1
@@ -441,42 +463,45 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
         rej_tasks_count = len(
             self._failed_msg_rej_tasks.get(consumer_tag, ()))
 
-        if redelivered or rej_tasks_count > self.DELAYED_REJECTIONS_LIMIT:
-            if self.preserve_double_redelivery:
+        if redelivered or rej_tasks_count > self.delayed_rejections_limit:
+            if self._consume_state[consumer_tag].get('hang_rejected_messages'):
                 logger.debug(
                     "message %r already has `redelivered` bit, "
                     "hold it (don't nack nor ack)",
                     delivery_tag)
             else:
-                logger.error("reject message without redelivery flag: %r", msg)
-                self.basic_reject(delivery_tag, requeue=False)
+                logger.error("reject message (no requeue): %r", msg)
+                ch.basic_reject(delivery_tag, requeue=False)
         else:
-            def nack_failed_message():
+            logger.debug("schedule rejection for dt %r", delivery_tag)
+            msg_reject_delay = self._consume_state[consumer_tag].get('message_reqeue_delay') or 0
+
+            if msg_reject_delay:
+
+                def nack_failed_message():
+                    logger.debug("reject message, dt %r", delivery_tag)
+                    ch.basic_reject(delivery_tag, requeue=True)
+                    m = self._failed_msg_rej_tasks.get(consumer_tag)
+                    if m is not None:
+                        m.pop(delivery_tag, None)
+                    if m is not None and not m:
+                        del self._failed_msg_rej_tasks[consumer_tag]
+
+                clock = get_attached_clock(self)
+                fmrt = self._failed_msg_rej_tasks.setdefault(consumer_tag, {})
+                assert delivery_tag not in fmrt
+                t = clock.callLater(msg_reject_delay, nack_failed_message)
+                fmrt[delivery_tag] = t, ch
+                logger.debug("fmrt task is %r, dt %r", t, delivery_tag)
+            else:
                 logger.debug("reject message, dt %r", delivery_tag)
                 ch.basic_reject(delivery_tag, requeue=True)
-                m = self._failed_msg_rej_tasks.get(consumer_tag)
-                if m is not None:
-                    m.pop(delivery_tag, None)
-                if m is not None and not m:
-                    del self._failed_msg_rej_tasks[consumer_tag]
-
-            logger.debug("schedule rejection for dt %r", delivery_tag)
-            delay = random.normalvariate(
-                self.message_rejection_delay,
-                self.message_rejection_delay * 0.05)
-
-            clock = get_attached_clock(self)
-            t = clock.callLater(max(delay, 0), nack_failed_message)
-
-            fmrt = self._failed_msg_rej_tasks.setdefault(consumer_tag, {})
-            assert delivery_tag not in fmrt
-            fmrt[delivery_tag] = t, ch
-
-            logger.debug("fmrt task is %r, dt %r", t, delivery_tag)
 
     @defer.inlineCallbacks
     def consumeQueue(
             self, queue='', callback=None, no_ack=False,
+            message_reqeue_delay=120,
+            hang_rejected_messages=None,
             consumer_tag=None, parallel=0, **kwargs):
 
         assert callback
@@ -503,6 +528,8 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
             parallel=parallel,
             kwargs=kwargs,
             queue=queue,
+            message_reqeue_delay=(message_reqeue_delay or 0),
+            hang_rejected_messages=(hang_rejected_messages or False),
         )
 
         self._queueCounsumingLoop(
@@ -521,6 +548,8 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
             callback=None, exchange='', no_ack=False,
             parallel=0, consumer_tag=None, routing_key='',
             bind_arguments=None, queue_arguments=None,
+            message_reqeue_delay=None,
+            hang_rejected_messages=None,
     ):
 
         logger.debug("declare exclusive queue")
@@ -542,6 +571,8 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
             consumer_tag=consumer_tag,
             parallel=parallel,
             no_ack=no_ack,
+            message_reqeue_delay=message_reqeue_delay,
+            hang_rejected_messages=hang_rejected_messages,
         )
 
         self._exclusive_queues[ct] = queue, no_ack
@@ -589,12 +620,23 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
 
     def declareQueue(
             self, queue, passive=False, durable=False,
+            message_ttl=None, dead_letter_exchange=None, dead_letter_exchange_rk=None,
             exclusive=False, auto_delete=False, arguments=None):
 
         logger.info(
             "declare queue %r (passive=%d, "
             "durable=%d, exclusive=%d, auto_delete=%d)",
             queue, passive, durable, exclusive, auto_delete)
+
+        if message_ttl is not None:
+            arguments = dict(arguments or ())
+            arguments['x-message-ttl'] = int(message_ttl)
+
+        if dead_letter_exchange is not None:
+            arguments = dict(arguments or ())
+            arguments['x-dead-letter-exchange'] = dead_letter_exchange
+            if dead_letter_exchange_rk:
+                arguments['x-dead-letter-routing-key'] = dead_letter_exchange_rk
 
         return self._write_channel.queue_declare(
             queue=queue, passive=passive, durable=durable, exclusive=exclusive,
@@ -654,8 +696,6 @@ class AMQPClient(PersistentClientFactory):
             password=None,
             heartbeat=None,
             prefetch_count=None,
-            message_rejection_delay=120,
-            preserve_double_redelivery=True,
             disconnect_period=10800,
             max_outgoing_queue_size=50000,
             max_outgoing_messages_delay=250,
@@ -664,8 +704,6 @@ class AMQPClient(PersistentClientFactory):
         self.schema = schema
         self.disconnectDelay = disconnect_period
         self.prefetch_count = prefetch_count
-        self.message_rejection_delay = message_rejection_delay
-        self.preserve_double_redelivery = preserve_double_redelivery
         self.max_outgoing_queue_size = max_outgoing_queue_size
         self.max_outgoing_messages_delay = max_outgoing_messages_delay
 
@@ -715,9 +753,8 @@ class AMQPClient(PersistentClientFactory):
         logger.debug("build amqp protocol, params %r", self._protocol_parameters)
         p = self.protocol(
             parameters=self._protocol_parameters,
-            schema=self.schema, prefetch_count=self.prefetch_count,
-            message_rejection_delay=self.message_rejection_delay,
-            preserve_double_redelivery=self.preserve_double_redelivery,
+            schema=self.schema,
+            prefetch_count=self.prefetch_count,
         )
 
         self._handshaking_made = False
@@ -893,12 +930,16 @@ def loadSchema(schema):
 class _BaseConsumer(service.Service):
 
     def __init__(self, client, callback, parallel=0,
-                 no_ack=False, deserialize=True, **kwargs):
+                 no_ack=False, deserialize=True,
+                 message_reqeue_delay=None,
+                 hang_rejected_messages=None):
         self.client = client
         self.callback = callback
         self.deserialize = deserialize
         self.parallel = parallel
         self.no_ack = no_ack
+        self.message_reqeue_delay = message_reqeue_delay
+        self.hang_rejected_messages = hang_rejected_messages
 
     @defer.inlineCallbacks
     def startService(self):
@@ -922,14 +963,18 @@ class QueueConsumer(_BaseConsumer):
 
     """Consumes AMQP queue & runs callback."""
 
-    def __init__(self, client, queue, callback, *args, **kwargs):
+    def __init__(self, client, queue, callback,
+                 *args, **kwargs):
         _BaseConsumer.__init__(self, client, callback, *args, **kwargs)
         self.queue = queue
 
     def _consume(self):
         return self.client.consumeQueue(
             self.queue, self.onMessage,
-            parallel=self.parallel, no_ack=self.no_ack,
+            parallel=self.parallel,
+            no_ack=self.no_ack,
+            message_reqeue_delay=self.message_reqeue_delay,
+            hang_rejected_messages=self.hang_rejected_messages,
         )
 
 
@@ -942,7 +987,12 @@ class ExchangeConsumer(_BaseConsumer):
 
     def _consume(self):
         return self.client.consumeExchange(
-            self.exchange, self.onMessage, parallel=self.parallel, no_ack=self.no_ack,
+            self.exchange,
+            self.onMessage,
+            parallel=self.parallel,
+            no_ack=self.no_ack,
+            message_reqeue_delay=self.message_reqeue_delay,
+            hang_rejected_messages=self.hang_rejected_messages,
         )
 
 
@@ -956,20 +1006,33 @@ class AMQPService(PersistentClientService):
 
     def setupQueueConsuming(
             self, connection, callback, queue,
-            parallel=0, no_ack=False, deserialize=True,
+            no_ack=False,
+            parallel=0,
+            deserialize=True,
+            message_reqeue_delay=120,
+            hang_rejected_messages=False,
     ):
         logger.debug("setup queue consuming for conn %r, queue %r", connection, queue)
         qc = QueueConsumer(
             client=self[connection],
-            callback=callback, queue=queue,
-            parallel=parallel, no_ack=no_ack,
+            callback=callback,
+            queue=queue,
+            parallel=parallel,
+            no_ack=no_ack,
             deserialize=deserialize,
+            message_reqeue_delay=message_reqeue_delay,
+            hang_rejected_messages=hang_rejected_messages,
         )
         self.addService(qc)
 
     def setupExchangeConsuming(
-            self, connection, callback, exchange, no_ack=False,
-            parallel=0, routing_key=None, bind_arguments=None, queue_arguments=None,
+            self, connection, callback, exchange,
+            routing_key=None,
+            no_ack=False,
+            parallel=0,
+            deserialize=True,
+            message_reqeue_delay=120,
+            hang_rejected_messages=False,
     ):
         logger.debug("setup exchange consuming for conn %r, exch %r", connection, exchange)
 
@@ -977,17 +1040,22 @@ class AMQPService(PersistentClientService):
             client=self[connection],
             callback=callback,
             exchange=exchange,
+            routing_key=routing_key,
+            deserialize=deserialize,
             no_ack=no_ack,
             parallel=parallel,
-            routing_key=routing_key,
-            bind_arguments=None,
-            queue_arguments=None,
+            message_reqeue_delay=message_reqeue_delay,
+            hang_rejected_messages=hang_rejected_messages,
         )
         self.addService(qc)
 
     def makeSender(
-            self, connection, exchange='', routing_key=None,
-            routing_key_fn=None, content_type='json', confirm=True,
+            self, connection,
+            exchange='',
+            routing_key=None,
+            routing_key_fn=None,
+            content_type='json',
+            confirm=True,
     ):
         assert routing_key is None or routing_key_fn is None
 

@@ -191,7 +191,6 @@ class ReconnectTest(BaseTest):
     def test_invalid_handler(self):
 
         self.client.maxDelay = 0.01
-        self.client.message_rejection_delay = 0.2
         yield self.client_connector.disconnect()
 
         def rcv(x):
@@ -199,7 +198,11 @@ class ReconnectTest(BaseTest):
             if self.publish:
                 raise Exception("some error here")
 
-        sql = amqp.QueueConsumer(self.client, QX, rcv)
+        sql = amqp.QueueConsumer(
+            self.client, QX, rcv,
+            message_reqeue_delay=0.2,
+            hang_rejected_messages=True,
+        )
         yield sleep(0.1)
 
         yield sql.startService()
