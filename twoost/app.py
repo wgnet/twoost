@@ -4,11 +4,8 @@ from __future__ import print_function, division, absolute_import
 
 import os
 
-import twisted
-from twisted.internet import reactor
-from twisted.application.service import Application
-from twisted.internet import endpoints
-from twisted.application import internet
+from twisted.internet import endpoints, defer, reactor, task
+from twisted.application import internet, service
 
 from . import log, geninit
 from .conf import settings
@@ -20,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     'attach_service',
+    'react_app',
     'build_dbs',
     'build_amqps',
     'build_web',
@@ -38,6 +36,19 @@ def attach_service(app, s):
     logger.info("attach service %s to application", s)
     s.setServiceParent(app)
     return s
+
+
+def react_app(app, main, argv=()):
+
+    @defer.inlineCallbacks
+    def main(reactor):
+        yield defer.maybeDeferred(service.IService(app).startService)
+        try:
+            yield defer.maybeDeferred(main, *argv)
+        finally:
+            yield defer.maybeDeferred(service.IService(app).stopService)
+
+    return task.react(main)
 
 
 def build_timer(app, step, callback, stop_on_error=False):
@@ -186,6 +197,6 @@ class AppWorker(geninit.Worker):
         self.init_settings(workerid)
         self.init_logging(workerid)
 
-        app = Application(workerid)
+        app = service.Application(workerid)
         self.init_app(app, workerid)
         return app
