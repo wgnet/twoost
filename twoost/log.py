@@ -37,11 +37,14 @@ def _redirect_twisted_log():
     log.startLoggingWithObserver(log.PythonLoggingObserver().emit, setStdout=0)
 
 
-def setup_logging():
+def setup_logging(appname):
     global _log_initialized
     assert not _log_initialized
     _log_initialized = True
     reactor.addSystemEventTrigger('after', 'shutdown', logging.shutdown)
+    settings.add_config({
+        'TWOOST_LOG_APPNAME': appname,
+    })
     _do_logging_config()
     _redirect_twisted_log()
 
@@ -49,39 +52,39 @@ def setup_logging():
 def setup_script_logging(debug=None):
     script_name = os.path.basename(sys.argv[0])
     settings.add_config({
-        '_TWOOST__LOG_FILE_NAME': script_name + ".log",
-        '_TWOOST__LOG_REDIRECT_ALL_TO_CONSOLE': True,
+        'TWOOST_LOG_TEE_TO_CONSOLE': True,
     })
     if debug is not None:
         settings.add_config({'DEBUG': debug})
-    setup_logging()
+    setup_logging(appname=script_name)
 
 
 class LoggingSettings(Config):
 
+    TWOOST_LOG_APPNAME = "-"
     TWOOST_LOG_LEVEL = None
+    TWOOST_LOG_TEE_TO_CONSOLE = None
 
     LOG_INTERVAL = 'D'
     LOG_DIR = os.environ.get("LOG_DIR") or os.path.expanduser("~/logs")
-
-    _TWOOST__LOG_FILE_NAME = None
-    _TWOOST__LOG_REDIRECT_ALL_TO_CONSOLE = None
 
     @property
     def LOG_LEVEL(self):
         return logging.DEBUG if settings.DEBUG else logging.INFO
 
     @property
+    def TWOOST_LOG_NAME(self):
+        return settings.TWOOST_LOG_APPNAME + ".log"
+
+    @property
     def LOGGING(self):
 
         level = settings.LOG_LEVEL
         log_interval = settings.LOG_INTERVAL
+        workerid = settings.TWOOST_LOG_APPNAME
 
         log_dir = settings.LOG_DIR
-        log_file = os.path.join(
-            log_dir,
-            settings._TWOOST__LOG_FILE_NAME or (settings.APPNAME + ".log")
-        )
+        log_file = os.path.join(log_dir, settings.TWOOST_LOG_NAME)
 
         conf = {
             'version': 1,
@@ -110,7 +113,7 @@ class LoggingSettings(Config):
             'formatters': {
                 'verbose': {
                     'format': "[%(asctime)s] [%(levelname)s] [{0}/%(process)d] "
-                    "[%(name)s]:  %(message)s".format(settings.APPNAME),
+                    "[%(name)s]:  %(message)s".format(workerid),
                 },
                 'simple': {
                     'format': "%(asctime)s %(message)s",
@@ -128,7 +131,7 @@ class LoggingSettings(Config):
             },
         }
 
-        if settings._TWOOST__LOG_REDIRECT_ALL_TO_CONSOLE:
+        if settings.TWOOST_LOG_TEE_TO_CONSOLE:
             conf['root']['handlers'].append('console')
 
         return conf
@@ -265,7 +268,10 @@ class AdminEmailHandler(logging.Handler):
 
     def emit(self, record):
 
-        subject = "%s: %s %s" % (record.levelname, settings.APPNAME, record.getMessage())
+        subject = "%s: %s %s" % (
+            record.levelname,
+            settings.TWOOST_LOG_APPNAME,
+            record.getMessage())
         subject = self._format_subject(subject)
         message = self.format(record)
 
@@ -273,7 +279,7 @@ class AdminEmailHandler(logging.Handler):
         email.send_mail(
             subject, message,
             settings.EMAIL_DEFAULT_FROM,
-            settings.ADMINS,
+            [s[1] for s in settings.ADMINS],
         )
 
     def _format_subject(self, subject):

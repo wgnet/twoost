@@ -141,6 +141,7 @@ def build_manhole(app, namespace=None):
         logger.debug("don't create manhole server - production mode")
         return
 
+    import twisted
     from twoost.manhole import AnonymousShellFactory
     from twisted.application.internet import UNIXServer
 
@@ -182,21 +183,10 @@ class AppWorker(geninit.Worker):
         raise NotImplementedError
 
     def init_logging(self, workerid):
-        log.setup_logging()
-
-    def init_settings(self, workerid):
-        # note: here we can't modify 'LOG_DIR' & 'PID_DIR'
-        # appname used by `log`, `email` etc
-        settings.add_config({
-            'APPNAME': self.appname,
-            'WORKERID': workerid,
-        })
+        log.setup_logging(self.appname)
 
     def create_app(self, workerid):
-
-        self.init_settings(workerid)
         self.init_logging(workerid)
-
         app = service.Application(workerid)
         self.init_app(app, workerid)
         return app
