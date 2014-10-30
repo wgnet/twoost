@@ -9,11 +9,10 @@ from .conf import Config
 
 class DefaultSettings(Config):
 
-    WORKERS_COUNT = {}
-
     DEBUG = False
     ADMINS = []
 
+    WORKERS_COUNT = {}
     DATABASES = {}
     AMQP_CONNECTIONS = {}
     AMQP_SCHEMAS = {}
@@ -24,8 +23,8 @@ class DefaultSettings(Config):
     MANHOLE_SOCKET = os.path.expandvars("$HOME/run/manhole/$WORKERID.sock")
 
     EMAIL_DEFAULT_FROM = "{0}@{1}".format(getpass.getuser(), socket.gethostname())
-    EMAIL_HOST_USER = None
-    EMAIL_HOST_PASSWORD = None
+    EMAIL_USER = None
+    EMAIL_PASSWORD = None
     EMAIL_HOST = "localhost"
     EMAIL_PORT = 25
 
