@@ -74,16 +74,16 @@ class IAMQPSchemaBuilder(zope.interface.Interface):
         pass
 
     def bindQueue(
-            queue,
             exchange,
+            queue,
             routing_key='',
             arguments=None,
     ):
         pass
 
     def bindExchange(
-            destination,
             source,
+            destination,
             routing_key='',
             arguments=None,
     ):
@@ -230,7 +230,9 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
 
         if self.schema:
             logger.debug("declare schema...")
-            yield defer.maybeDeferred(self.schema.declareSchema, _SchemaBuilderProxy(self))
+            yield defer.maybeDeferred(
+                IAMQPSchema(self.schema).declareSchema,
+                _SchemaBuilderProxy(self))
             logger.info("amqp schema has been declared")
 
         self.ready_for_publish = True
@@ -559,7 +561,8 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
 
         logger.debug("bind exclusive queue %r to exchange %r", queue, exchange)
         yield self.bindQueue(
-            queue=queue, exchange=exchange,
+            exchange=exchange,
+            queue=queue,
             arguments=bind_arguments,
             routing_key=routing_key,
         )
@@ -657,7 +660,7 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
             durable=durable, exchange_type=exchange_type,
             auto_delete=auto_delete, arguments=arguments, internal=internal)
 
-    def bindQueue(self, queue, exchange, routing_key='', arguments=None):
+    def bindQueue(self, exchange, queue, routing_key='', arguments=None):
         logger.info(
             "bind exchange %r to queue %r (routing key is %r)",
             exchange, queue, routing_key)
@@ -665,7 +668,7 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
             queue=queue, exchange=exchange,
             routing_key=routing_key, arguments=arguments)
 
-    def bindExchange(self, destination, source, routing_key='', arguments=None):
+    def bindExchange(self, source, destination, routing_key='', arguments=None):
         logger.info(
             "bind exchange %r to exchange %r (routing key is %r)",
             destination, source, routing_key)

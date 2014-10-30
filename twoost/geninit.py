@@ -647,7 +647,7 @@ class TwistedGenInit(GenInit):
             p_name = p.name()
         except psutil.NoSuchProcess:
             p_name = None
-        return p_name == 'twistd' and GenInit.get_workerid_from_process(self, p)
+        return p_name == 'twistd' and GenInit.workerid_of_process(self, p)
 
 
 class Worker(TwistedGenInit):
