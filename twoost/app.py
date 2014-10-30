@@ -179,8 +179,9 @@ class AppWorker(geninit.Worker):
     log_dir = settings.LOG_DIR
     pid_dir = settings.PID_DIR
 
-    def init_app(self, app, workerid):
-        raise NotImplementedError
+    @property
+    def workers(self):
+        return settings.WORKERS_COUNT.get(self.appname, 1)
 
     def init_logging(self, workerid):
         log.setup_logging(self.appname)
@@ -190,3 +191,6 @@ class AppWorker(geninit.Worker):
         app = service.Application(workerid)
         self.init_app(app, workerid)
         return app
+
+    def init_app(self, app, workerid):
+        raise NotImplementedError

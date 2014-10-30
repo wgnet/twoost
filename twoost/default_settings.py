@@ -9,8 +9,7 @@ from .conf import Config
 
 class DefaultSettings(Config):
 
-    APPNAME = '-'
-    WORKERID = None
+    WORKERS_COUNT = {}
 
     DEBUG = False
     ADMINS = []
