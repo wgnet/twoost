@@ -4,7 +4,7 @@ import types
 import os
 
 from zope import interface
-from twisted.python import components
+from twisted.python import components, reflect
 
 
 __all__ = [
@@ -110,6 +110,16 @@ def load_conf_py(fname):
     return imp.load_source(fname, fname)
 
 
+def load_conf(s):
+    if s.startswith("py:"):
+        return load_conf_py(s)
+    else:
+        f = reflect.namedAny(s)
+        if callable(f):
+            f = f()
+        return f
+
+
 # --- global settings
 
 @interface.implementer(IConfig)
@@ -143,6 +153,8 @@ class ConfigProxy(object):
 
     def add_config(self, config):
         """Append new subconfig."""
+        if config is self:
+            return
         c = IConfig(config)
         if c not in self.__configs:
             self.__configs.append(c)
