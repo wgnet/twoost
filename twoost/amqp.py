@@ -904,14 +904,15 @@ class schemaFromDict(object):
 
         for bind in self.config.get('bind', ()):
             if isinstance(bind, (tuple, list)):
-                exchange, queue = bind
-                bind = {'exchange': exchange, 'queue': queue}
-            if 'queue' in bind and 'exchange' in bind:
-                yield builder.bindQueue(**bind)
-            elif 'destination' in bind and 'source' in bind:
-                yield builder.bindExchange(**bind)
+                yield builder.bindQueue(*bind)
             else:
-                raise Exception("invalid binding %r" % bind)
+                yield builder.bindQueue(**bind)
+
+        for bind in self.config.get('bind_exchange', ()):
+            if isinstance(bind, (tuple, list)):
+                yield builder.bindExchange(*bind)
+            else:
+                yield builder.bindExchange(**bind)
 
 
 components.registerAdapter(schemaFromDict, dict, IAMQPSchema)
