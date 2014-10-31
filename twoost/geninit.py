@@ -193,16 +193,16 @@ class GenInit(object):
 
     def workerid_of_process(self, p):
         env = self._process_environ(p) or {}
-        wid = env.get('WORKERID')
-        pid_dir = env.get('PID_DIR')
+        wid = env.get('TWOOST_WORKERID')
+        pid_dir = env.get('TWOOST_PID_DIR')
         if wid and self.is_workerid(wid) and self.pid_dir == pid_dir:
             return wid
 
     def create_worker_environ(self, workerid):
         env = dict(self.env or os.environ)
-        env['WORKERID'] = str(workerid)
-        env['PID_DIR'] = self.pid_dir
-        env['LOG_DIR'] = self.log_dir
+        env['TWOOST_WORKERID'] = str(workerid)
+        env['TWOOST_PID_DIR'] = self.pid_dir
+        env['TWOOST_LOG_DIR'] = self.log_dir
         return env
 
     def run_worker_process(self, workerid):

@@ -110,16 +110,6 @@ def load_conf_py(fname):
     return imp.load_source(fname, fname)
 
 
-def load_conf(s):
-    if s.startswith("py:"):
-        return load_conf_py(s)
-    else:
-        f = reflect.namedAny(s)
-        if callable(f):
-            f = f()
-        return f
-
-
 # --- global settings
 
 @interface.implementer(IConfig)

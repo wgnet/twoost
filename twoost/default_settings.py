@@ -19,8 +19,8 @@ class DefaultSettings(Config):
     RPC_PROXIES = {}
     MEMCACHE_SERVERS = {}
 
-    WEB_ENDPOINT = os.path.expandvars("unix:$HOME/run/www/$WORKERID.sock")
-    MANHOLE_SOCKET = os.path.expandvars("$HOME/run/manhole/$WORKERID.sock")
+    WEB_ENDPOINT = os.path.expandvars("unix:$HOME/run/www/$TWOOST_WORKERID.sock")
+    MANHOLE_SOCKET = os.path.expandvars("$HOME/run/manhole/$TWOOST_WORKERID.sock")
 
     EMAIL_DEFAULT_FROM = "{0}@{1}".format(getpass.getuser(), socket.gethostname())
     EMAIL_USER = None
@@ -31,4 +31,4 @@ class DefaultSettings(Config):
     LOGGING_CONFIG = 'logging.config.dictConfig'
     LOGGING = {'version': 1}
 
-    PID_DIR = os.environ.get("PID_DIR") or os.path.expanduser("~/run")
+    PID_DIR = os.environ.get("TWOOST_PID_DIR") or os.path.expanduser("~/run")

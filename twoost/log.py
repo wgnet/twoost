@@ -66,7 +66,7 @@ class LoggingSettings(Config):
     TWOOST_LOG_TEE_TO_CONSOLE = None
 
     LOG_INTERVAL = 'D'
-    LOG_DIR = os.environ.get("LOG_DIR") or os.path.expanduser("~/logs")
+    LOG_DIR = os.environ.get("TWOOST_LOG_DIR") or os.path.expanduser("~/logs")
 
     @property
     def LOG_LEVEL(self):
