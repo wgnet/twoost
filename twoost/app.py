@@ -41,14 +41,14 @@ def attach_service(app, s):
 def react_app(app, main, argv=()):
 
     @defer.inlineCallbacks
-    def main(reactor):
+    def appless_main(reactor):
         yield defer.maybeDeferred(service.IService(app).startService)
         try:
             yield defer.maybeDeferred(main, *argv)
         finally:
             yield defer.maybeDeferred(service.IService(app).stopService)
 
-    return task.react(main)
+    return task.react(appless_main)
 
 
 def build_timer(app, step, callback, stop_on_error=False):
@@ -124,6 +124,9 @@ def build_web(app, site_or_restree, prefix=None, endpoint=None, add_meta=True):
     from twoost import web
     logger.debug("build web service")
     endpoint = endpoint or settings.WEB_ENDPOINT
+    if endpoint.startswith("unix:"):
+        filename = endpoint[5:]
+        mkdir_p(os.path.dirname(filename))
     site = web.buildSite(site_or_restree, prefix, add_meta=add_meta)
     return build_server(app, site, endpoint)
 
@@ -176,8 +179,13 @@ def build_memcache(app, active_servers=None):
 
 class AppWorker(geninit.Worker):
 
-    log_dir = settings.LOG_DIR
-    pid_dir = settings.PID_DIR
+    @property
+    def log_dir(self):
+        return settings.LOG_DIR
+
+    @property
+    def pid_dir(self):
+        return settings.PID_DIR
 
     @property
     def workers(self):
@@ -186,11 +194,19 @@ class AppWorker(geninit.Worker):
     def init_logging(self, workerid):
         log.setup_logging(self.appname)
 
+    def main(self, args=None):
+        self.init_settings()
+        return geninit.Worker.main(self, args)
+
     def create_app(self, workerid):
+        self.init_settings()
         self.init_logging(workerid)
         app = service.Application(workerid)
         self.init_app(app, workerid)
         return app
+
+    def init_settings(self):
+        raise NotImplementedError
 
     def init_app(self, app, workerid):
         raise NotImplementedError

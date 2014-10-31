@@ -872,7 +872,7 @@ class AMQPClient(PersistentClientFactory):
                 consuming_installed = yield d
                 if consuming_installed and self.client and self._handshaking_made:
                     # don't wait - no `yield`
-                    yield self.client.cancelConsuming(consumer_tag)
+                    self.client.cancelConsuming(consumer_tag)
                 del self._consumed_queues_is_ready[consumer_tag]
 
 
@@ -933,6 +933,8 @@ def loadSchema(schema):
 
 class _BaseConsumer(service.Service):
 
+    cancel_consuming_timeout = 5
+
     def __init__(self, client, callback, parallel=0,
                  no_ack=False, deserialize=True,
                  message_reqeue_delay=None,
@@ -954,7 +956,10 @@ class _BaseConsumer(service.Service):
     @defer.inlineCallbacks
     def stopService(self):
         logger.debug("stop service %s", self)
-        yield self.client.cancelConsuming(self.consumer_key)
+        yield timed.timeoutDeferred(
+            self.client.cancelConsuming(self.consumer_key),
+            self.cancel_consuming_timeout,
+        ).addErrback(logger.exception, "Can't cancel consuming")
         service.Service.stopService(self)
 
     def onMessage(self, msg):
@@ -1000,6 +1005,22 @@ class ExchangeConsumer(_BaseConsumer):
         )
 
 
+class _ClientWithConsumersContainer(service.MultiService):
+
+    def __init__(self, client_service):
+        service.MultiService.__init__(self)
+        self.client_service = client_service
+
+    @defer.inlineCallbacks
+    def stopService(self):
+        yield service.MultiService.stopService(self)
+        yield self.client_service.stopService()
+
+    def startService(self):
+        self.client_service.startService()
+        service.MultiService.startService(self)
+
+
 class AMQPService(PersistentClientService):
 
     name = 'amqps'
@@ -1007,6 +1028,10 @@ class AMQPService(PersistentClientService):
     defaultPort = 5672
 
     # ---
+
+    def buildClientService(self, clientFactory, params):
+        s = PersistentClientService.buildClientService(self, clientFactory, params)
+        return _ClientWithConsumersContainer(s)
 
     def setupQueueConsuming(
             self, connection, callback, queue,
@@ -1027,7 +1052,7 @@ class AMQPService(PersistentClientService):
             message_reqeue_delay=message_reqeue_delay,
             hang_rejected_messages=hang_rejected_messages,
         )
-        self.addService(qc)
+        self.client_services[connection].addService(qc)
 
     def setupExchangeConsuming(
             self, connection, callback, exchange,
@@ -1051,7 +1076,7 @@ class AMQPService(PersistentClientService):
             message_reqeue_delay=message_reqeue_delay,
             hang_rejected_messages=hang_rejected_messages,
         )
-        self.addService(qc)
+        self.client_services[connection].addService(qc)
 
     def makeSender(
             self, connection,

@@ -2,6 +2,8 @@
 
 from __future__ import print_function, division, absolute_import
 
+import zope.interface
+
 from twisted.internet import reactor
 from twisted.internet import defer
 from twisted.trial.unittest import TestCase
@@ -39,6 +41,7 @@ class TestSchema(object):
         yield b.bindQueue(exchange='mcs_amqp_e12', queue='mcs_amqp_q2')
 
 
+@zope.interface.implementer(amqp.IAMQPSchema)
 class SingleQueueSchema(object):
 
     def __init__(self, queue, auto_delete=False):
@@ -49,6 +52,7 @@ class SingleQueueSchema(object):
         return b.declareQueue(queue=self.queue, auto_delete=self.auto_delete)
 
 
+@zope.interface.implementer(amqp.IAMQPSchema)
 class SingleExchangeSchema(object):
 
     def __init__(self, exchange, auto_delete=False):

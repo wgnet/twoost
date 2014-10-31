@@ -11,7 +11,7 @@ import collections
 import functools
 
 from twisted.internet import defer
-from twisted.internet.error import ConnectionClosed
+from twisted.internet.error import ConnectionClosed, ConnectionDone
 from twisted.python import failure
 from twisted.internet import protocol
 from twisted.application import service
@@ -239,8 +239,7 @@ class PersistentClientFactory(_SpiriousReconnectingClientFactory):
         return p
 
     def clientConnectionLost(self, connector, reason):
-
-        logger.debug("client connection lost due to %s", reason)
+        logger.debug("connection due to %r", reason)
         self.client = None
         _SpiriousReconnectingClientFactory.clientConnectionLost(self, connector, reason)
 
@@ -277,6 +276,7 @@ class PersistentClientService(service.MultiService):
     def __init__(self, connections):
         service.MultiService.__init__(self)
         self.clients = {}
+        self.client_services = {}
         self.connections = dict(connections)
         for connection, cparams in self.connections.items():
             self._initClientService(connection, cparams)
@@ -316,6 +316,7 @@ class PersistentClientService(service.MultiService):
             self.addService(client)
         self.clients[connection] = client
         client_service = self.buildClientService(client, params)
+        self.client_services[connection] = client_service
         self.addService(client_service)
 
     def __getitem__(self, connection):

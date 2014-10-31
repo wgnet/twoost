@@ -417,12 +417,14 @@ class GenInit(object):
             self.wait_for_processes(nps, wait)
 
         if kill:
-            # no wait
-            for workerid in natural_sorted(all_workes):
-                self._maybe_kill_worker(workerid, wait=0)
-            res = self.wait_for_processes(nps, 0.1) and res
 
-            # final shot (check if process is still alive)
+            if wait:
+                # no wait
+                for workerid in natural_sorted(all_workes):
+                    self._maybe_kill_worker(workerid, wait=0)
+                res = self.wait_for_processes(nps, 0.1) and res
+
+            # final shot (check if processis still alive)
             for workerid in natural_sorted(all_workes):
                 self._maybe_kill_worker(workerid, wait=0.01)
 
@@ -598,7 +600,7 @@ class GenInit(object):
 
         self.log_error("there is another running geninit process")
 
-    def run(self, args=None):
+    def main(self, args=None):
 
         self._create_dirs()
         parser = self.create_parser()
@@ -656,11 +658,11 @@ class Worker(TwistedGenInit):
 
     def create_worker_environ(self, workerid):
         env = TwistedGenInit.create_worker_environ(self, workerid)
-        env['GENINIT_CTOR'] = reflect.qual(type(self))
+        env['TWOOST_GENINIT_CTOR'] = reflect.qual(type(self))
         return env
 
     def create_twisted_application(self):
-        workerid = os.environ['WORKERID']
+        workerid = os.environ['TWOOST_WORKERID']
         return self.create_app(workerid)
 
     def create_app(self, workerid):
@@ -681,7 +683,7 @@ def main(argv=None, gi_ctor=None):
             print("No function/class found: %r" % gi_ctor, file=sys.stderr)
             sys.exit(2)
 
-    gi_ctor().run(args[1:])
+    gi_ctor().main(args[1:])
 
 
 if __name__ == '__main__':
