@@ -1,8 +1,9 @@
 -- -*- mode: sql; sql-product: postgres; -*-
 
+-- @ forward
+
 CREATE TABLE events (
-  kind text,
-  description text,
+  id text primary key,
   payload bytea,
-  created timestamp DEFAULT current_timestamp,
+  created timestamp DEFAULT current_timestamp
 );

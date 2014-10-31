@@ -1,3 +1,0 @@
-configuration files, settings etc
-structure - "<env-name>/<component-or-application>/.."
-copy files from to "$HOME/conf/" or "$CONF_DIR/conf/"

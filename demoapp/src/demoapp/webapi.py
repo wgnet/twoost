@@ -18,13 +18,10 @@ class WebAPIService(Service):
 
     @defer.inlineCallbacks
     def new_event(self, payload):
-
-        # validate & normalize payload...
-
-        # normalize, here we add unique id to event
-        uid = uuid.uuid4().get_hex()
-        assert 'uid' not in payload
-        payload['uid'] = uid
-
-        yield self.queue_event_callback(payload)
-        defer.returnValue({'uid': uid})
+        # TODO: validate & normalize payload...
+        id = uuid.uuid4().get_hex()
+        yield self.queue_event_callback({
+            'payload': str(payload),
+            'id': id,
+        })
+        defer.returnValue({'id': id})

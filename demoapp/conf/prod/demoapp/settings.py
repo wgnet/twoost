@@ -1,3 +1,4 @@
+from __future__ import absolute_import
 import os
 
 DEBUG = False
@@ -13,7 +14,7 @@ WORKERS_COUNT = {
 }
 
 DATABASES = {
-    'demoapp': {
+    'default': {
         'driver': 'sqlite',
         'database': os.path.expanduser("~/demoapp.db"),
     },

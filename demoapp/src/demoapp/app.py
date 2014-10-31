@@ -1,14 +1,24 @@
 # coding: utf-8
 
+import os
 from twoost.app import *  # noqa
-from twoost.conf import settings  # noqa
+from twoost.conf import settings, load_conf_py
 
+from . import default_settings
 from . import __version__
 
 
-class WebAPI(AppWorker):
+def init_demoapp_settings():
+    conf_dir = os.environ.get("DEMOAPP_CONF_DIR") or os.path.expanduser("~/conf")
+    settings.add_config(default_settings)
+    settings.add_config(load_conf_py(os.path.join(conf_dir, "demoapp/settings.py")))
+    # settings.add_config({'DEBUG': True'})
+
+
+class WebAPIWorker(AppWorker):
 
     appname = 'demoapp-webapi'
+    init_settings = staticmethod(init_demoapp_settings)
 
     def init_app(self, app, workerid):
 
@@ -42,35 +52,41 @@ class WebAPI(AppWorker):
             'new_event': webapi_service.new_event,
         }
 
-        build_web(app, {
+        restree = {
+            # index
             'hello-world': SlowHelloWorldResource(),
             'rpc': {
                 'dumbrpc': DumbRPCResource(rpc_methods),
                 'xmlrpc': XMLRPCResource(rpc_methods),
                 # TODO: add JSON-RPC ?
-            }
-        })
+            },
+        }
+
+        build_web(app, restree, prefix='demoapp')
 
         # autodisabled unless settings.DEBUG switched on
         build_manhole(app, locals())
 
 
-class DBWorker(AppWorker):
+class StorageWorker(AppWorker):
 
-    appname = 'demoapp-dbworker'
+    appname = 'demoapp-storage'
+    init_settings = staticmethod(init_demoapp_settings)
 
     def init_app(self, app, workerid):
-        from demoapp import storage, dbworker
+
+        from demoapp.dao import DBDaoService
+        from demoapp.storage import StorageService
 
         dbs = build_dbs(app)
         memcache = build_memcache(app)
         amqps = build_amqps(app)
 
-        dao = attach_service(app, storage.DBDaoService(
+        dao = attach_service(app, DBDaoService(
             dbs=dbs,
             memcache=memcache,
         ))
-        dbw_service = attach_service(app, dbworker.DBWorkerService(
+        dbw_service = attach_service(app, StorageService(
             dao=dao,
             # links to other services, callbacks etc
         ))

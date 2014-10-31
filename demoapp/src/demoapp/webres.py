@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 # various web resources
 
-class SlowHelloWorldResource(web.LeafResourceMixin, web.Resource):
+class SlowHelloWorldResource(web.Resource):
 
     @defer.inlineCallbacks
     def render_GET(self, request):

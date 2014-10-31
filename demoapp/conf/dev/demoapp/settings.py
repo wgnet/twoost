@@ -1,7 +1,12 @@
 # coding: utf-8
 
+from __future__ import absolute_import
+import os
+
 DEBUG = True
 ADMINS = []
+
+WEB_ENDPOINT = os.path.expandvars("unix:/tmp/www/$TWOOST_WORKERID.sock")
 
 WORKERS_COUNT = {
     'demoapp-webapi': 2,
@@ -9,9 +14,9 @@ WORKERS_COUNT = {
 }
 
 DATABASES = {
-    'demoapp': {
+    'default': {
         'driver': 'sqlite',
-        'database': ":memory:",
+        'database': os.path.expanduser("~/demoapp_dev.db"),
     },
 }
 
