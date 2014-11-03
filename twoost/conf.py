@@ -4,7 +4,7 @@ import types
 import os
 
 from zope import interface
-from twisted.python import components, reflect
+from twisted.python import components
 
 
 __all__ = [

@@ -7,9 +7,9 @@ import os
 from twisted.internet import endpoints, defer, reactor, task
 from twisted.application import internet, service
 
-from . import log, geninit
-from .conf import settings
-from ._misc import ignore_errors, subdict, mkdir_p
+from twoost import log, geninit
+from twoost.conf import settings
+from twoost._misc import ignore_errors, subdict, mkdir_p
 
 import logging
 logger = logging.getLogger(__name__)

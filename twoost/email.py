@@ -8,7 +8,7 @@ from email.mime.text import MIMEText
 from twisted.mail.smtp import ESMTPSenderFactory, SMTPSenderFactory
 from twisted.internet import reactor, defer
 
-from .conf import settings
+from twoost.conf import settings
 
 
 import logging

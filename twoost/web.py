@@ -114,7 +114,7 @@ class MergedResource(object):
     def isLeaf(self):
         return all(res.isLeaf for res in self.resources)
 
-    def ignoredResource(self, resource):
+    def isIgnoredResource(self, resource):
         return isinstance(resource, ErrorPage)
 
     def getChildWithDefault(self, name, request):
@@ -122,7 +122,7 @@ class MergedResource(object):
             res if res.isLeaf else res.getChildWithDefault(name, request)
             for res in self.resources
         )
-        subs = itertools.ifilterfalse(self.skipingResource, all_subs)
+        subs = itertools.ifilterfalse(self.isIgnoredResource, all_subs)
         return type(self)(lazycol(subs))
 
     def render(self, request):
@@ -170,7 +170,7 @@ class _PingResource(LeafResourceMixin, Resource):
 
 class WSGIResource(_WSGIResource):
 
-    "Hacked WSGIResource.  It allows you to serve app through unix-socket."
+    "Hacked WSGIResource. Allows serving wsgi apps through unix-socket."
 
     def render(self, request):
         # socket host has no 'port' attribute
@@ -182,6 +182,8 @@ class WSGIResource(_WSGIResource):
 # -- sites
 
 class Site(_Site):
+
+    "Silent version of twisted.web.server.Site. Don't write requests to twisted.log."
 
     def __init__(
             self, resource, logPath=None,
@@ -211,10 +213,8 @@ class Site(_Site):
 class UnitTestSite(Site):
 
     """
-    Special version of HTTPFactory.
-    Tracks all active connections.
-
-    Should be used only in unit-tests!
+    Special version of HTTPFactory. Tracks all active connections.
+    WARN: Should be used only in unit-tests!
     """
 
     def __init__(self, *args, **kwargs):

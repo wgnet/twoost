@@ -680,7 +680,7 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
         return 'amqp'
 
 
-# -- client factory
+# -- _client factory
 
 class AMQPClient(PersistentClientFactory):
 
@@ -720,14 +720,14 @@ class AMQPClient(PersistentClientFactory):
             'connection_attempts': None,
         }
 
-        self.consuming_callbacks = {}
+        self._consuming_callbacks = {}
 
         # transient state
         self._consumed_queues_is_ready = {}
         self._hm_deffers = []
         self._handshaking_made = False
         self._client_prepared = False
-        self.client = None
+        self._client = None
 
     def logPrefix(self):
         return 'amqp'
@@ -763,8 +763,8 @@ class AMQPClient(PersistentClientFactory):
         self._handshaking_made = False
         self._client_prepared = False
 
-        self.client = p
-        self.client.factory = self
+        self._client = p
+        self._client.factory = self
 
         p._on_handshaking_made.addCallback(
             lambda _: self._clientHandshakingMade(p))
@@ -780,20 +780,20 @@ class AMQPClient(PersistentClientFactory):
         return x
 
     def clientConnectionLost(self, connector, reason):
-        if self.client and self.client.heartbeat:
+        if self._client and self._client.heartbeat:
             logger.debug("stop heartbeating")
-            self.client.heartbeat.stop()
+            self._client.heartbeat.stop()
         PersistentClientFactory.clientConnectionLost(self, connector, reason)
 
     @defer.inlineCallbacks
     def _prepareClient(self):
         logger.debug("setup consuming...")
 
-        for consumer_tag, consume in self.consuming_callbacks.items():
+        for consumer_tag, consume in self._consuming_callbacks.items():
             logger.debug(
                 "invoke consuming callback for consumer tag %r",
                 consumer_tag)
-            yield consume(self.client)
+            yield consume(self._client)
             d = self._consumed_queues_is_ready.get(consumer_tag)
             if d and not d.called:
                 d.callback(True)
@@ -806,7 +806,7 @@ class AMQPClient(PersistentClientFactory):
             if not d.called:
                 logger.debug(
                     "found %r in `_consumed_queues_is_ready`"
-                    " but not in `consuming_callbacks`", consumer_tag)
+                    " but not in `_consuming_callbacks`", consumer_tag)
                 d.errback(Exception("can't consume - bad state"))
 
     def _generateConsumerTag(self):
@@ -819,11 +819,11 @@ class AMQPClient(PersistentClientFactory):
     @defer.inlineCallbacks
     def _consumeAndSaveCallback(self, consumer_tag, consume):
         logger.debug("setup consuming, ct %s consumer_tag", consumer_tag)
-        self.consuming_callbacks[consumer_tag] = consume
-        if self.client and self._client_prepared:
+        self._consuming_callbacks[consumer_tag] = consume
+        if self._client and self._client_prepared:
             d = self._consumed_queues_is_ready[consumer_tag]
             try:
-                yield consume(self.client)
+                yield consume(self._client)
                 d.callback(True)
             except:
                 d.errback(failure.Failure())
@@ -858,21 +858,21 @@ class AMQPClient(PersistentClientFactory):
 
     @defer.inlineCallbacks
     def cancelConsuming(self, consumer_tag):
-        logger.debug("client - cancel consuming, consumer_tag %r", consumer_tag)
+        logger.debug("_client - cancel consuming, consumer_tag %r", consumer_tag)
 
-        c = self.consuming_callbacks.pop(consumer_tag, None)
+        c = self._consuming_callbacks.pop(consumer_tag, None)
         if c is None:
             logger.warning("unknown consumer tag %r", consumer_tag)
             return
 
-        if c and self.client:
+        if c and self._client:
             d = self._consumed_queues_is_ready.get(consumer_tag)
             if d:
                 logger.debug("wait for queue with ct %s...", consumer_tag)
                 consuming_installed = yield d
-                if consuming_installed and self.client and self._handshaking_made:
+                if consuming_installed and self._client and self._handshaking_made:
                     # don't wait - no `yield`
-                    self.client.cancelConsuming(consumer_tag)
+                    self._client.cancelConsuming(consumer_tag)
                 del self._consumed_queues_is_ready[consumer_tag]
 
 
@@ -935,11 +935,13 @@ class _BaseConsumer(service.Service):
 
     cancel_consuming_timeout = 5
 
-    def __init__(self, client, callback, parallel=0,
-                 no_ack=False, deserialize=True,
-                 message_reqeue_delay=None,
-                 hang_rejected_messages=None):
-        self.client = client
+    def __init__(
+            self, _client, callback, parallel=0,
+            no_ack=False, deserialize=True,
+            message_reqeue_delay=None,
+            hang_rejected_messages=None):
+
+        self._client = _client
         self.callback = callback
         self.deserialize = deserialize
         self.parallel = parallel
@@ -957,7 +959,7 @@ class _BaseConsumer(service.Service):
     def stopService(self):
         logger.debug("stop service %s", self)
         yield timed.timeoutDeferred(
-            self.client.cancelConsuming(self.consumer_key),
+            self._client.cancelConsuming(self.consumer_key),
             self.cancel_consuming_timeout,
         ).addErrback(logger.exception, "Can't cancel consuming")
         service.Service.stopService(self)
@@ -972,13 +974,13 @@ class QueueConsumer(_BaseConsumer):
 
     """Consumes AMQP queue & runs callback."""
 
-    def __init__(self, client, queue, callback,
+    def __init__(self, _client, queue, callback,
                  *args, **kwargs):
-        _BaseConsumer.__init__(self, client, callback, *args, **kwargs)
+        _BaseConsumer.__init__(self, _client, callback, *args, **kwargs)
         self.queue = queue
 
     def _consume(self):
-        return self.client.consumeQueue(
+        return self._client.consumeQueue(
             self.queue, self.onMessage,
             parallel=self.parallel,
             no_ack=self.no_ack,
@@ -990,12 +992,12 @@ class QueueConsumer(_BaseConsumer):
 class ExchangeConsumer(_BaseConsumer):
 
     """Consumes AMQP exchange & runs callback."""
-    def __init__(self, client, exchange, callback, *args, **kwargs):
-        _BaseConsumer.__init__(self, client, callback, *args, **kwargs)
+    def __init__(self, _client, exchange, callback, *args, **kwargs):
+        _BaseConsumer.__init__(self, _client, callback, *args, **kwargs)
         self.exchange = exchange
 
     def _consume(self):
-        return self.client.consumeExchange(
+        return self._client.consumeExchange(
             self.exchange,
             self.onMessage,
             parallel=self.parallel,
@@ -1043,7 +1045,7 @@ class AMQPService(PersistentClientService):
     ):
         logger.debug("setup queue consuming for conn %r, queue %r", connection, queue)
         qc = QueueConsumer(
-            client=self[connection],
+            _client=self[connection],
             callback=callback,
             queue=queue,
             parallel=parallel,
@@ -1066,7 +1068,7 @@ class AMQPService(PersistentClientService):
         logger.debug("setup exchange consuming for conn %r, exch %r", connection, exchange)
 
         qc = ExchangeConsumer(
-            client=self[connection],
+            _client=self[connection],
             callback=callback,
             exchange=exchange,
             routing_key=routing_key,
