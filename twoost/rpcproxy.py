@@ -41,23 +41,20 @@ def make_xmlrpc_proxy(params):
 
     p = dict(params)
     url = p.pop('url')
-
-    user = p.pop('user', None)
-    passwd = p.pop('passwd', None)
-    assert bool(user) == bool(passwd)
-
     timeout = p.pop('timeout', 60.0)
+
+    cp_size = p.pop('cp_size', 5)
     c_timeout = p.pop('c_timeout', 30.0)
     assert not p
 
-    logger.debug("create xmlrpc-proxy, url %r", url)
-    return httprpc.XMLRPCProxy(
-        url=url,
-        user=user,
-        password=passwd,
-        connectTimeout=c_timeout,
-        timeout=timeout,
-    )
+    http_pool = client.HTTPConnectionPool(reactor)
+    http_pool._factory = _NoiselessHTTP11ClientFactory
+    http_pool.retryAutomatically = False
+    http_pool.maxPersistentPerHost = cp_size
+    agent = client.Agent(reactor, pool=http_pool, connectTimeout=c_timeout)
+
+    logger.debug("create xml-proxy, url %r", url)
+    return httprpc.XMLRPCProxy(url, agent=agent, timeout=timeout)
 
 
 def make_dumbrpc_proxy(params):
@@ -66,13 +63,8 @@ def make_dumbrpc_proxy(params):
     url = p.pop('url')
     timeout = p.pop('timeout', 60.0)
 
-    user = p.pop('user', None)
-    passwd = p.pop('passwd', None)
-    assert bool(user) == bool(passwd)
-
     cp_size = p.pop('cp_size', 5)
     c_timeout = p.pop('c_timeout', 30.0)
-
     assert not p
 
     http_pool = client.HTTPConnectionPool(reactor)

@@ -4,6 +4,7 @@ from __future__ import print_function, division, absolute_import
 
 import json
 import cgi
+import xmlrpclib
 
 from twisted.web.http_headers import Headers
 from twisted.web import client, xmlrpc
@@ -22,7 +23,7 @@ __all__ = [
     'XMLRPCProxy',
     'DumbRPCProxy',
     'DumbRPCResource',
-    'DumbRPCError',
+    'HttpRPCError',
     'withRequest',
 ]
 
@@ -48,7 +49,7 @@ def _log_method_call(fn, method):
 
 # -- dumbrpc
 
-class DumbRPCError(Exception):
+class HttpRPCError(Exception):
 
     def __init__(self, response_code, response_body, response_content_type=None):
         Exception.__init__(self, response_code, response_body, response_content_type)
@@ -57,10 +58,10 @@ class DumbRPCError(Exception):
         self.response_content_type = response_content_type
 
 
-class EmptyDumbRPCResponseBodyError(DumbRPCError):
+class EmptyHttpRPCResponseBodyError(HttpRPCError):
 
     def __init__(self, response_code, response_content_type=None):
-        DumbRPCError.__init__(self, response_code, "", response_content_type)
+        HttpRPCError.__init__(self, response_code, "", response_content_type)
 
 
 class DumbRPCResource(web.LeafResourceMixin, web.Resource):
@@ -122,7 +123,7 @@ class DumbRPCResource(web.LeafResourceMixin, web.Resource):
         logger.debug("callRemote %r with args %r", method, args)
         try:
             res = yield defer.maybeDeferred(callback, *args)
-        except DumbRPCError as e:
+        except HttpRPCError as e:
             logger.debug("rpc call failure", exc_info=1)
             request.setResponseCode(e.response_code)
             resp_body = e.response_body
@@ -163,11 +164,11 @@ class DumbRPCProxy(object):
         resp_body = yield client.readBody(resp)
 
         if resp.code != 200:
-            raise DumbRPCError(resp.code, resp_body, resp_ct)
+            raise HttpRPCError(resp.code, resp_body, resp_ct)
 
         # TODO: read body & parse errors
         if not resp_body:
-            raise EmptyDumbRPCResponseBodyError(resp.code, response_content_type=resp_ct)
+            raise EmptyHttpRPCResponseBodyError(resp.code, response_content_type=resp_ct)
 
         response = json.loads(resp_body)
         defer.returnValue(response)
@@ -194,15 +195,44 @@ class XMLRPCResource(xmlrpc.XMLRPC):
         return sorted(a | b)
 
 
-class XMLRPCProxy(xmlrpc.Proxy):
+class XMLRPCProxy(object):
 
-    def __init__(self, url, timeout=60.0, **kwargs):
-        xmlrpc.Proxy.__init__(self, allowNone=True, url=url, **kwargs)
+    def __init__(self, url, agent=None, timeout=60,
+                 xmlrpclib_use_datetime=False, xmlrpclib_allow_none=True):
         self.url = url
-        self.originCallRemote = xmlrpc
         self.timeout = timeout
+        self.agent = agent or client.Agent(reactor)
         self.callRemote = timed.withTimeout(self.timeout)(self._call_remote)
+        self.xmlrpclib_allow_none = xmlrpclib_allow_none
+        self.xmlrpclib_use_datetime = xmlrpclib_use_datetime
 
+    @defer.inlineCallbacks
     def _call_remote(self, method, *args):
-        logger.debug("remote call to %r, method %r with args %r", self.url, method, args)
-        return xmlrpc.Proxy.callRemote(self, method, *args)
+
+        body = xmlrpc.payloadTemplate % (
+            method,
+            xmlrpclib.dumps(args, allow_none=self.xmlrpclib_allow_none),
+        )
+        body_p = web.StringBodyProducer(body)
+        headers = Headers({
+            b'content-type': [b'application/json'],
+            b'content-type': ['text/xml'],
+            b'content-length': [len(body)],
+        })
+        logger.debug("call request to %r, args %r", self.url, args)
+        resp = yield self.agent.request(
+            'POST', self.url, headers=headers, bodyProducer=body_p)
+        logger.debug("response code %r", resp.code)
+
+        resp_ct = resp.headers.getRawHeaders(b'content-type', [None])[-1]
+        resp_body = yield client.readBody(resp)
+
+        if resp.code != 200:
+            raise HttpRPCError(resp.code, resp_body, resp_ct)
+
+        # TODO: read body & parse errors
+        if not resp_body:
+            raise EmptyHttpRPCResponseBodyError(resp.code, response_content_type=resp_ct)
+
+        response = xmlrpclib.loads(resp_body, use_datetime=self.xmlrpclib_use_datetime)
+        defer.returnValue(response[0][0])
