@@ -5,6 +5,9 @@ from __future__ import print_function, division, absolute_import
 import json
 import cgi
 import xmlrpclib
+import base64
+
+import zope.interface
 
 from twisted.web.http_headers import Headers
 from twisted.web import client, xmlrpc
@@ -45,6 +48,22 @@ def _log_method_call(fn, method):
             logger.debug("invoked method %r with args %r", method, args)
             return fn(*args)
     return wrapper
+
+
+@zope.interface.implementer(client.IAgent)
+class BasicAuthAgent(object):
+    """
+    An L{Agent} wrapper to handle basic auth.
+    """
+
+    def __init__(self, agent, username, password):
+        self._agent = agent
+        self._auth_header = b"Basic " + base64.b64encode("%s:%s" % (username, password))
+
+    def request(self, method, uri, headers=None, bodyProducer=None):
+        headers = Headers() if headers is None else headers.copy()
+        headers.addRawHeader(b'authorization', self._auth_header)
+        return self._agent.request(method, uri, headers, bodyProducer)
 
 
 # -- dumbrpc
@@ -153,7 +172,10 @@ class DumbRPCProxy(object):
         uri = self.url + "?method=" + method
 
         body_p = web.StringBodyProducer(body)
-        headers = Headers({b'content-type': [b'application/json']})
+        headers = Headers({
+            b'content-type': [b'application/json'],
+            b'content-length': [len(body)],
+        })
 
         logger.debug("call request to %r, args %r", uri, args)
         resp = yield self.agent.request(
@@ -215,9 +237,8 @@ class XMLRPCProxy(object):
         )
         body_p = web.StringBodyProducer(body)
         headers = Headers({
-            b'content-type': [b'application/json'],
             b'content-type': ['text/xml'],
-            b'content-length': [len(body)],
+            b'content-length': [str(len(body))],
         })
         logger.debug("call request to %r, args %r", self.url, args)
         resp = yield self.agent.request(
