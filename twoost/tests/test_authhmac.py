@@ -23,7 +23,7 @@ class TestResource(web.LeafResourceMixin, web.Resource):
         return 'ok'
 
 
-class DeferredResourceTest(TestCase):
+class AuthHMACTest(TestCase):
 
     def setUp(self):
         self.resource = authhmac.protectResource(TestResource(), "key", "secret")
@@ -79,7 +79,7 @@ class DeferredResourceTest(TestCase):
     @defer.inlineCallbacks
     def test_too_old_request(self):
         agent = authhmac.AuthHMACAgent(self.agent, "key", "secret")
-        headers = Headers({'date': [datetimeToString(time.time() - 300)]})
+        headers = Headers({'date': [datetimeToString(time.time() - 1500)]})
         bodyp = web.StringBodyProducer("some content")
         resp = yield agent.request('POST', self.request_url(""), headers, bodyp)
         yield self.check_fail(resp)

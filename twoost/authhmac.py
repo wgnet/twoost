@@ -1,7 +1,7 @@
 # utf-8
 
 """
-AuthHMAC is loosely based on the Amazon Web Services authentication scheme
+AuthHMAC is loosely based on the Amazon Web Services authentication scheme v2
 but without the Amazon specific components, i.e. it is HMAC for the rest of us.
 
 @see: U(https://github.com/seangeo/auth-hmac)
@@ -11,12 +11,13 @@ import time
 import hmac
 import binascii
 import hashlib
+import urlparse
 
 import zope.interface
 
 from twisted.internet import defer
 from twisted.cred import credentials, error
-from twisted.web.iweb import ICredentialFactory
+from twisted.web.iweb import ICredentialFactory, IAgent
 from twisted.web.resource import IResource
 from twisted.web.http import stringToDatetime, datetimeToString
 from twisted.web.http_headers import Headers
@@ -25,6 +26,7 @@ from twisted.web.client import _URI
 from twoost.web import StringBodyProducer, StringConsumer
 
 
+@zope.interface.implementer(IAgent)
 class AuthHMACAgent(object):
 
     """
@@ -35,7 +37,7 @@ class AuthHMACAgent(object):
         self.agent = agent
         self.accessKey = accessKey
         self.secretKey = secretKey
-        self._client_server_time_diff = 0
+        self._client_server_time_diffs = {}
 
     @defer.inlineCallbacks
     def request(self, method, uri, headers, bodyProducer):
@@ -46,7 +48,7 @@ class AuthHMACAgent(object):
             headers = headers.copy()
 
         contentType = headers.getRawHeaders('content-type', [""])[0]
-        date = headers.getRawHeaders('date', [""])[0] or self._generateRequestDate()
+        date = headers.getRawHeaders('date', [""])[0] or self._generateRequestDate(uri)
         headers.setRawHeaders('date', [date])
 
         uri_origin_form = _URI.fromBytes(uri).originForm
@@ -67,22 +69,23 @@ class AuthHMACAgent(object):
         mac = hmac.new(self.secretKey, sts, digestmod=hashlib.sha1).digest()
         encodedMAC = binascii.b2a_base64(mac).strip()
 
-        headers.addRawHeader(
-            'authorization',
-            "AuthHMAC {0}:{1}".format(self.accessKey, encodedMAC))
+        auth_header = "AuthHMAC {0}:{1}".format(self.accessKey, encodedMAC)
+        headers.addRawHeader('authorization', auth_header)
 
         d = yield self.agent.request(method, uri, headers, bodyProducer)
-        self._readResponseDate(d)
+        self._handleResponseDate(uri, d)
         defer.returnValue(d)
 
-    def _generateRequestDate(self):
-        t = time.time() + self._client_server_time_diff
+    def _generateRequestDate(self, uri):
+        server = urlparse.urlparse(uri).netloc
+        t = time.time() + self._client_server_time_diffs.get(server, 0)
         return datetimeToString(t)
 
-    def _readResponseDate(self, r):
+    def _handleResponseDate(self, uri, r):
         d = r.headers.getRawHeaders('date', [None])[0]
         if d:
-            self._client_server_time_diff = stringToDatetime(d) - time.time()
+            server = urlparse.urlparse(uri).netloc
+            self._client_server_time_diffs[server] = stringToDatetime(d) - time.time()
 
     def _respondToChallenge(self, response, method, uri, headers, body):
         authenticate = response.headers.getRawHeaders('www-authenticate')[0]
@@ -129,20 +132,23 @@ class AuthHMACCredentialFactory(object):
 
     scheme = 'authhmac'
 
-    def __init__(self, realm, time_window=60):
+    # client timestamp included with an authenticated request must be within 15 minutes
+    # of the servers system time when the request is received.
+    max_request_time_delta = 900
+
+    def __init__(self, realm, max_request_time_delta=None):
         self.realm = realm
-        self.time_window = time_window
-        self.require_date = time_window is not None
+        self.max_request_time_delta = max_request_time_delta or self.max_request_time_delta
 
     def getChallenge(self, request):
         return {'realm': self.realm}
 
     def checkDate(self, date):
-        if not date and self.require_date:
+        if not date and self.max_request_time_delta is not None:
             raise error.LoginFailed("Missing mandatory 'date' header")
         t2 = stringToDatetime(date)
         t1 = time.time()
-        if self.time_window is not None and abs(t1 - t2) > self.time_window:
+        if self.max_request_time_delta is not None and abs(t1 - t2) > self.max_request_time_delta:
             raise error.LoginFailed("Request 'date' too old")
 
     def readBodyHash(self, request):
