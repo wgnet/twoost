@@ -218,5 +218,5 @@ def protectResource(resource, accessKey, secretKey, realm=None):
     cred_checker.addUser(accessKey, secretKey)
     portal = Portal(portal_realm, [cred_checker])
 
-    cred_factory = AuthHMACCredentialFactory(realm or 'arpetool-app')
+    cred_factory = AuthHMACCredentialFactory(realm or 'twoost-app')
     return HTTPAuthSessionWrapper(portal, [cred_factory])

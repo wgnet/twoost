@@ -72,7 +72,7 @@ class HttpRPCError(Exception):
 
     def __init__(self, response_code, response_body, response_content_type=None):
         Exception.__init__(self, response_code, response_body, response_content_type)
-        self.response_code = response_code or 555
+        self.response_code = response_code or 0
         self.response_body = response_body or ""
         self.response_content_type = response_content_type
 
