@@ -1,107 +1,113 @@
 # coding: utf-8
 
 import os
+import functools
 
 from twisted.enterprise.adbapi import ConnectionPool
 from twisted.application import service
+from twisted.python import reflect
 
 import logging
 logger = logging.getLogger(__name__)
 
 
-__all__ = [
-    'DatabaseService',
-    'make_dbpool',
-]
+__all__ = ['DatabaseService', 'make_dbpool']
 
 
-try:
-    import sqlite3
-except ImportError:
-    logger.debug("SqLite driver not found")
-
-try:
-    import psycopg2
-    import psycopg2.extras
-except ImportError:
-    logger.debug("PgSQL driver not found")
-
-try:
-    import MySQLdb
-    import MySQLdb.cursors
-except ImportError:
-    logger.debug("MySQL driver not found")
-
-
-# ---
-
-class _PGSqlConnectionPool(ConnectionPool):
+class TwoostConnectionPool(ConnectionPool):
 
     def __init__(self, *args, **kwargs):
-        ConnectionPool.__init__(self, *args, cursor_factory=psycopg2.extras.DictCursor, **kwargs)
+        ConnectionPool.__init__(self, **kwargs)
+        self.cp_init_conn = kwargs.pop('cp_init_conn')
+        if isinstance(self.cp_init_conn, basestring):
+            self.cp_init_conn = reflect.namedAny(self.cp_init_conn)
 
-    def _runInteraction(self, interaction, *args, **kw):
-        try:
-            return ConnectionPool._runInteraction(self, interaction, *args, **kw)
-        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
-            logger.warning("resetting DB db_pooll due to %r", e)
-            for conn in self.connections.values():
-                self._close(conn)
-            self.connections.clear()
-            return ConnectionPool._runInteraction(self, interaction, *args, **kw)
+    def _disconnect_current(self):
+        conn = self.connections.get(self.threadID())
+        if conn:
+            logger.debug("disconnect %r", conn)
+            self.disconnect(conn)
+
+    def retry_on_error(self, e):
+        return False
+
+    def _mk_retry(fn):
+
+        @functools.wraps(fn)
+        def wrapper(self, *args, **kwargs):
+            try:
+                return fn(self, *args, **kwargs)
+            except self.retry_on_errors as e:
+                if not self.retry_on_error(e):
+                    raise
+                # connection lost etc.
+                logger.exception("retry operation %s(*%s, **%s)", fn.__name__, args, kwargs)
+                self._disconnect_current()
+                return fn(self, *args, **kwargs)
+
+        return wrapper
+
+    # not wrap runInteraction & runWithConnection
+    runQuery = _mk_retry(ConnectionPool.runQuery)
+    runOperation = _mk_retry(ConnectionPool.runOperation)
 
     def prepare_connection(self, connection):
-        psycopg2.extras.register_hstore(connection)
+        if self.cp_init_conn:
+            logger.debug("init db connection - run %s on %s", self.cp_init_conn, connection)
+            self.cp_init_conn(connection)
 
     def connect(self):
-        old_connections = self.connections
+        new_connection = self.threadID() not in self.connections
         conn = ConnectionPool.connect(self)
-        new_connection = conn not in old_connections
         if new_connection:
             self.prepare_connection(conn)
         return conn
 
 
-class _MySQLConnectionPool(ConnectionPool):
-    """Reconnecting adbapi connection pool for MySQL.
-
-    This class improves on the solution posted at
-    http://www.gelens.org/2008/09/12/reinitializing-twisted-connectionpool/
-    by checking exceptions by error code and only disconnecting the current
-    connection instead of all of them.
-
-    Also see:
-    http://twistedmatrix.com/pipermail/twisted-python/2009-July/020007.html
-
-    """
+class PGSqlConnectionPool(TwoostConnectionPool):
 
     def __init__(self, *args, **kwargs):
+        import psycopg2
+        import psycopg2.extras
+        ConnectionPool.__init__(self, *args, cursor_factory=psycopg2.extras.DictCursor, **kwargs)
+        self.pg_extras = kwargs.pop('pg_extras', ['hstore', 'json'])
+        self._retry_on_errors = (psycopg2.OperationalError, psycopg2.InterfaceError)
+
+    def retry_on_error(self, e):
+        return isinstance(e, self._retry_on_errors)
+
+    def prepare_connection(self, connection):
+        import psycopg2.extras
+        for e in self.pg_extras:
+            getattr(psycopg2.extras, "register_" + e)(connection)
+        return TwoostConnectionPool.prepare_connection(connection)
+
+
+class MySQLConnectionPool(TwoostConnectionPool):
+
+    def __init__(self, *args, **kwargs):
+        import MySQLdb
+        import MySQLdb.cursors
         ConnectionPool.__init__(self, *args, cursorclass=MySQLdb.cursors.DictCursor, **kwargs)
+        self.retry_on_errors = (MySQLdb.OperationalError,)
 
-    def _runInteraction(self, interaction, *args, **kwargs):
-        try:
-            return ConnectionPool._runInteraction(self, interaction, *args, **kwargs)
-        except MySQLdb.OperationalError as e:
-            logger.error("ERROR, %r, type %s", e, type(e))
-            if e[0] not in (2006, 2013):
-                raise
-            conn = self.connections.get(self.threadID())
-            self.disconnect(conn)
-            # try the interaction again
-            return ConnectionPool._runInteraction(self, interaction, *args, **kwargs)
+    def retry_on_error(self, e):
+        return isinstance(e, self._retry_on_errors) and e[0] in (2006, 2013)
 
 
-class _SQLiteConnectionPool(ConnectionPool):
+class _SQLiteConnectionPool(TwoostConnectionPool):
 
-    def connect(self):
-        conn = ConnectionPool.connect(self)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def prepare_connection(self, connection):
+        import sqlite3
+        connection.row_factory = sqlite3.Row
+        return TwoostConnectionPool.prepare_connection(self, connection)
 
 
 # ---
 
 def make_sqlite_dbpool(db):
+
+    import sqlite3
 
     db = db.copy()
     db['database'] = os.path.expandvars(db['database'])
@@ -126,7 +132,7 @@ def make_mysql_dbpool(db):
     db.setdefault('port', 3306)
 
     logger.debug("connecting to mysqldb %r", db['db'])
-    return _MySQLConnectionPool('MySQLdb', **db)
+    return MySQLConnectionPool('MySQLdb', **db)
 
 
 def make_pgsql_dbpool(db):
@@ -137,7 +143,7 @@ def make_pgsql_dbpool(db):
     db.setdefault('port', 5432)
 
     logger.debug("connecting to pgsql %r", db['database'])
-    return _PGSqlConnectionPool('psycopg2', **db)
+    return PGSqlConnectionPool('psycopg2', **db)
 
 
 def make_dbpool(db):
