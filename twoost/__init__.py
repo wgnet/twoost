@@ -1,6 +1,6 @@
 # coding: utf-8
 
-__version__ = '0.1a1'
+__version__ = '0.1a2'
 
 
 def _init_default_settings():
