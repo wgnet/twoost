@@ -320,9 +320,9 @@ class QueueConsumerTest(BaseTest):
     def test_serialization(self):
         message_body = {'one': 1, 'list': [1, {'sub': ['a', 'b']}, 3], 'bool': False}
         yield self.send_and_receive_one_message('json', message_body)
-        yield self.send_and_receive_one_message('pickle', message_body)
+        yield self.send_and_receive_one_message('msgpack', message_body)
         yield self.send_and_receive_one_message('application/json', message_body)
-        yield self.send_and_receive_one_message('application/pickle', message_body)
+        yield self.send_and_receive_one_message('application/msgpack', message_body)
 
     @defer.inlineCallbacks
     def test_without_serialization(self):
