@@ -106,14 +106,17 @@ def make_loop_proxy(params):
     return LoopRPCProxy(target=target, timeout=timeout)
 
 
+RPC_PROXY_FACTORY = {
+    'xmlrpc': make_xmlrpc_proxy,
+    'httprpc': make_dumbrpc_proxy,
+    'loop': make_loop_proxy,
+}
+
+
 def make_rpc_proxy(params):
     params = dict(params)
     protocol = params.pop('protocol')
-    return {
-        'xmlrpc': make_xmlrpc_proxy,
-        'httprpc': make_dumbrpc_proxy,
-        'loop': make_loop_proxy,
-    }[protocol](params)
+    return RPC_PROXY_FACTORY[protocol](params)
 
 
 # --- integration with twisted app framework

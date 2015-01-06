@@ -179,17 +179,18 @@ def make_pgsql_dbpool(db):
     return PGSqlConnectionPool('psycopg2', **db)
 
 
+DB_POOL_FACTORY = {
+    'mysql': make_mysql_dbpool,
+    'pgsql': make_pgsql_dbpool,
+    'sqlite': make_sqlite_dbpool,
+}
+
+
 def make_dbpool(db):
     db = dict(db)
     driver = db.pop('driver')
-    return {
-        'mysql': make_mysql_dbpool,
-        'pgsql': make_pgsql_dbpool,
-        'sqlite': make_sqlite_dbpool,
-    }[driver](db)
+    return DB_POOL_FACTORY[driver](db)
 
-
-# --- integration with twisted app framework
 
 class DatabaseService(service.Service):
 
