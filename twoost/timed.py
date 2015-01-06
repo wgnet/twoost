@@ -10,6 +10,7 @@ __all__ = [
     'withTimeout',
     'withParallelLimit',
     'TimeoutError',
+    'CloseableDeferredQueue',
 ]
 
 
@@ -76,3 +77,33 @@ def withParallelLimit(limit, timeout=120):
 
 def sleep(time):
     return task.deferLater(reactor, time, int)
+
+
+class CloseableDeferredQueue(defer.DeferredQueue):
+
+    _closed = False
+
+    def close(self, why=None):
+
+        if self._closed:
+            raise Exception("queue already closed")
+        why = why or StopIteration()
+
+        while self.waiting:
+            self.waiting.pop(0).errback(why)
+
+        self._closed = why
+
+    def _ensure_open(self):
+        if self._closed:
+            raise self._closed
+
+    def put(self, x):
+        self._ensure_open()
+        return defer.DeferredQueue.put(self, x)
+
+    def get(self):
+        if self.pending:
+            return defer.succeed(self.pending.pop(0))
+        self._ensure_open()
+        return defer.DeferredQueue.get(self)
