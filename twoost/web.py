@@ -20,6 +20,7 @@ from twisted.web.client import FileBodyProducer
 from twisted.web.error import UnsupportedMethod
 from twisted.web.wsgi import WSGIResource as _WSGIResource
 from twisted.python import log
+from twisted.python.compat import intToBytes
 
 from twoost.conf import settings
 from twoost._misc import lazycol
@@ -46,29 +47,54 @@ __all__ = [
 
 # -- various resources
 
+
 class Resource(_Resource, object):
 
     """Hacked version of Resource with support of returning `Deferreds` from `render_*`"""
 
+    def _maybeSetContentLengthHeader(self, request, length):
+        if request.responseHeaders.getRawHeaders(b'content-length'):
+            # 'content-length' has been set manually
+            return
+        # twisted skip new headers when 'self.write' already has been callled
+        request.setHeader(b'content-length', intToBytes(length))
+
     def finishRequest(self, request, body=None):
         if body:
-            if not request.startedWriting:
-                content_length = request.responseHeaders.getRawHeaders(b'content-length')
-                if content_length is None:
-                    request.setHeader(b'content-length', ("%d" % len(body)).encode('ascii'))
+            self._maybeSetContentLengthHeader(request, len(body))
             request.write(body)
         if not request.__finished:
             request.finish()
 
     def failRequest(self, request, reason):
-        logger.debug("fail request %r", request)
 
-        # `request.processingFailed` calls `log.err`, we use it for consistency
-        if request.__finished:
-            log.err(reason)
-        else:
+        logger.debug("fail request %r", request)
+        if request.__finished and reason.check(defer.CancelledError):
+            pass
+        elif request.__finished:
+            # `request.processingFailed` calls `log.err`, we use it for consistency
+            log.err(reason, "request %r failed" % request)
+        elif hasattr(request, 'processingFailed'):
             # processingFailed call `finish`
             request.processingFailed(reason)
+        else:
+            # 'request' doesn't have internal twisted method 'processingFailed'
+            self._processingFailedFallback(request, reason)
+
+        if not request.__finished:
+            request.finish()
+
+    def _processingFailedFallback(self, request, reason):
+        body = b"Processing Failed"
+        self.setResponseCode(500)
+        self.setHeader(b'content-type', b"text/plain")
+        self.setHeader(b'content-length', intToBytes(len(body)))
+        self.write(body)
+        request.finish()
+
+    def _ignoreCancelledError(self, e, request):
+        e.trap(defer.CancelledError)
+        logger.debug("request %r doesn't support cancelling", request)
 
     def requestFinished(self, reason, request, bodyd):
         request.__finished = True
