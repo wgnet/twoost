@@ -6,9 +6,19 @@ from __future__ import print_function, division
 Simple Twisted-style abstraction around AMQP pika library.
 """
 
-import pickle
 import json
 import functools
+
+try:
+    import msgpack
+except ImportError:
+    msgpack = None
+
+if not msgpack:
+    try:
+        import umsgpack as msgpack
+    except ImportError:
+        pass
 
 import zope.interface
 
@@ -123,28 +133,48 @@ class AMQPMessage(object):
         return r
 
 
+class _NopeSerializer(object):
+
+    @staticmethod
+    def loads(s):
+        return s
+
+    @staticmethod
+    def dumps(s):
+        return s
+
+
+MESSAGE_SERIALIZERS = {
+    None: _NopeSerializer,
+    'plain/text': _NopeSerializer,
+    'application/octet-stream': _NopeSerializer,
+    'json': json,
+    'application/json': json,
+}
+
+
+if msgpack:
+    MESSAGE_SERIALIZERS.update({
+        'msgpack': msgpack,
+        'application/x-msgpack': msgpack,
+        'application/msgpack': msgpack,
+    })
+
+
 def deserialize(data, content_type):
     logger.debug("deserialize data %r, content_type %r", data, content_type)
     if not content_type:
         return data
-    if content_type in ['json', 'application/json']:
-        return json.loads(data)
-    elif content_type in ['pickle', 'application/pickle']:
-        return pickle.loads(data)
-    else:
-        return data
+    s = MESSAGE_SERIALIZERS[content_type.lower()]
+    return s.loads(data)
 
 
 def serialize(data, content_type):
     logger.debug("serialize data %r, content_type %r", data, content_type)
     if not content_type:
         return data
-    if content_type in ['json', 'application/json']:
-        return json.dumps(data)
-    elif content_type in ['pickle', 'application/pickle']:
-        return pickle.dumps(data)
-    else:
-        return data
+    s = MESSAGE_SERIALIZERS[content_type.lower()]
+    return s.dumps(data)
 
 
 # ---

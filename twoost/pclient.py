@@ -11,7 +11,7 @@ import collections
 import functools
 
 from twisted.internet import defer
-from twisted.internet.error import ConnectionClosed, ConnectionDone
+from twisted.internet.error import ConnectionClosed
 from twisted.python import failure
 from twisted.internet import protocol
 from twisted.application import service

@@ -31,5 +31,6 @@ setup(
         'pika>=0.9.12',
         'psutil>=2.0',
         'argparse>=1.2',
+        'msgpack-python>=0.4',
     ],
 )
