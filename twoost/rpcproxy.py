@@ -5,7 +5,7 @@ from twisted.application import service
 from twisted.python import reflect
 from twisted.web import client
 
-from twoost import httprpc
+from twoost import httprpc, authhmac
 from twoost.timed import withTimeout
 
 import logging
@@ -18,9 +18,7 @@ __all__ = [
 ]
 
 
-# ---
-
-class LoopRPCProxy(object):
+class LoopRPCProxy(service.Service):
 
     def __init__(self, target, timeout=60.0):
         self.target = target
@@ -35,17 +33,29 @@ class _NoiselessHTTP11ClientFactory(client.HTTPConnectionPool._factory):
     noisy = False
 
 
-# ---
+class _HTTPPoolClientProxyService(service.Service):
 
-def make_xmlrpc_proxy(params):
+    def __init__(self, http_pool, proxy):
+        self.http_pool = http_pool
+        self.proxy = proxy
 
-    p = dict(params)
-    url = p.pop('url')
-    timeout = p.pop('timeout', 60.0)
+    def callLater(self, method, *args):
+        return self.proxy.callLater(method, *args)
 
-    cp_size = p.pop('cp_size', 5)
-    c_timeout = p.pop('c_timeout', 30.0)
-    assert not p
+    def stopService(self):
+        logger.debug("close http pool %r", self.http_pool)
+        self.http_pool.closeCachedConnections()
+        return service.Service.stopService(self)
+
+
+def make_http_pool_and_agent(params):
+
+    cp_size = params.get('cp_size', 5)
+    c_timeout = params.get('c_timeout', 30.0)
+
+    # XXX: more extensibility
+    auth = params.get('auth', 'authhmac')
+    assert not auth or auth.lower() in ['none', 'authhmac', 'basic', 'digest']
 
     http_pool = client.HTTPConnectionPool(reactor)
     http_pool._factory = _NoiselessHTTP11ClientFactory
@@ -53,35 +63,43 @@ def make_xmlrpc_proxy(params):
     http_pool.maxPersistentPerHost = cp_size
     agent = client.Agent(reactor, pool=http_pool, connectTimeout=c_timeout)
 
+    if not auth or auth.lower() == 'none':
+        pass
+    elif auth.lower() == 'authhmac':
+        access_key = params['access_key']
+        secret_key = params.get('secret_key')
+        agent = authhmac.AuthHMACAgent(agent, access_key, secret_key)
+    elif auth.lower() == 'basic':
+        username = params['username']
+        password = params.get('password')
+        agent = httprpc.BasicAuthAgent(agent, username, password)
+    else:
+        raise AssertionError("unknown %r auth" % auth)
+
+    return http_pool, agent
+
+
+def make_xmlrpc_proxy(params):
+    url = params.get('url')
+    timeout = params.get('timeout', 60.0)
+    http_pool, agent = make_http_pool_and_agent(params)
     logger.debug("create xml-proxy, url %r", url)
-    return httprpc.XMLRPCProxy(url, agent=agent, timeout=timeout)
+    proxy = httprpc.XMLRPCProxy(url, agent=agent, timeout=timeout)
+    return _HTTPPoolClientProxyService(proxy, http_pool)
 
 
 def make_dumbrpc_proxy(params):
-
-    p = dict(params)
-    url = p.pop('url')
-    timeout = p.pop('timeout', 60.0)
-
-    cp_size = p.pop('cp_size', 5)
-    c_timeout = p.pop('c_timeout', 30.0)
-    assert not p
-
-    http_pool = client.HTTPConnectionPool(reactor)
-    http_pool._factory = _NoiselessHTTP11ClientFactory
-    http_pool.retryAutomatically = False
-    http_pool.maxPersistentPerHost = cp_size
-    agent = client.Agent(reactor, pool=http_pool, connectTimeout=c_timeout)
-
+    url = params.get('url')
+    timeout = params.get('timeout', 60.0)
+    http_pool, agent = make_http_pool_and_agent(params)
     logger.debug("create dumprpc-proxy, url %r", url)
-    return httprpc.DumbRPCProxy(url, agent=agent, timeout=timeout)
+    proxy = httprpc.DumbRPCProxy(url, agent=agent, timeout=timeout)
+    return _HTTPPoolClientProxyService(proxy, http_pool)
 
 
 def make_loop_proxy(params):
-    p = dict(params)
-    target = p.pop('target')
-    timeout = p.pop('timeout', 60.0)
-    assert not p
+    target = params.get('target')
+    timeout = params.get('timeout', 60.0)
     if isinstance(target, basestring):
         target = reflect.namedAny(target)
     logger.debug("create loop-rpc-proxy, target is %r", target)
@@ -109,23 +127,18 @@ class RPCProxyService(service.MultiService):
         self.rpc_proxies = {}
 
     def startService(self):
-
         logger.debug("create rpc_proxies...")
-
         for client_name, params in self.proxies.items():
-
             logger.info("connect to %r, params %r", client_name, params)
             client = make_rpc_proxy(params)
             self.rpc_proxies[client_name] = client
-
             if service.IService.providedBy(client):
                 self.addService(client)
-
         service.Service.startService(self)
 
     def makeCaller(self, method, proxy_name='default'):
         def call(*args):
-            return self.getProxy(proxy_name).callLater(method, *args)
+            return self[proxy_name].callLater(method, *args)
         return call
 
     def __getitem__(self, proxy_name):
