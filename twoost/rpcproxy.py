@@ -39,8 +39,8 @@ class _HTTPPoolClientProxyService(service.Service):
         self.http_pool = http_pool
         self.proxy = proxy
 
-    def callLater(self, method, *args):
-        return self.proxy.callLater(method, *args)
+    def callRemote(self, method, *args):
+        return self.proxy.callRemote(method, *args)
 
     def stopService(self):
         logger.debug("close http pool %r", self.http_pool)
@@ -85,7 +85,7 @@ def make_xmlrpc_proxy(params):
     http_pool, agent = make_http_pool_and_agent(params)
     logger.debug("create xml-proxy, url %r", url)
     proxy = httprpc.XMLRPCProxy(url, agent=agent, timeout=timeout)
-    return _HTTPPoolClientProxyService(proxy, http_pool)
+    return _HTTPPoolClientProxyService(http_pool, proxy)
 
 
 def make_dumbrpc_proxy(params):
@@ -94,7 +94,7 @@ def make_dumbrpc_proxy(params):
     http_pool, agent = make_http_pool_and_agent(params)
     logger.debug("create dumprpc-proxy, url %r", url)
     proxy = httprpc.DumbRPCProxy(url, agent=agent, timeout=timeout)
-    return _HTTPPoolClientProxyService(proxy, http_pool)
+    return _HTTPPoolClientProxyService(http_pool, proxy)
 
 
 def make_loop_proxy(params):
@@ -108,7 +108,7 @@ def make_loop_proxy(params):
 
 RPC_PROXY_FACTORY = {
     'xmlrpc': make_xmlrpc_proxy,
-    'httprpc': make_dumbrpc_proxy,
+    'dumbrpc': make_dumbrpc_proxy,
     'loop': make_loop_proxy,
 }
 

@@ -7,6 +7,7 @@ from twisted.python import failure
 
 __all__ = [
     'sleep',
+    'timeoutDeferred',
     'withTimeout',
     'withParallelLimit',
     'TimeoutError',
