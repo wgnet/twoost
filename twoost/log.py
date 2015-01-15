@@ -290,3 +290,7 @@ class AdminEmailHandler(logging.Handler):
         """
         formatted_subject = subject.replace('\n', '\\n').replace('\r', '\\r')
         return formatted_subject[:989]
+
+# ---
+
+settings.add_config(LoggingSettings())

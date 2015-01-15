@@ -159,5 +159,14 @@ class ConfigProxy(object):
             self.__reload()
         return self.__current
 
+# ---
+
+
+def _init_default_settings():
+    from twoost.default_settings import DefaultSettings
+    settings.add_config(DefaultSettings())
+
 
 settings = ConfigProxy()
+_init_default_settings()
+del _init_default_settings
