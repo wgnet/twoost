@@ -134,13 +134,27 @@ class SQLiteConnectionPool(TwoostConnectionPool):
 
 # ---
 
-def make_sqlite_dbpool(db):
-
-    import sqlite3
-
-    db = db.copy()
+def normalize_sqlite_db_conf(db):
     db['database'] = os.path.expandvars(db['database'])
 
+
+def normalize_mysql_db_conf(db):
+    if 'db' not in db and 'database' in db:
+        db['db'] = db.pop('database')
+    if 'passwd' not in db and 'password' in db:
+        db['passwd'] = db.pop('password')
+
+
+def normalize_pgsql_db_conf(db):
+    db.setdefault('cp_reconnect', True)
+    db.setdefault('host', 'localhost')
+    db.setdefault('port', 5432)
+
+
+def make_sqlite_dbpool(db):
+    import sqlite3
+    db = dict(db)
+    normalize_sqlite_db_conf(db)
     logger.debug("connecting to sqlite db %r", db['database'])
     return SQLiteConnectionPool(
         'sqlite3',
@@ -151,30 +165,15 @@ def make_sqlite_dbpool(db):
 
 
 def make_mysql_dbpool(db):
-
     db = dict(db)
-
-    if 'db' not in db and 'database' in db:
-        db['db'] = db.pop('database')
-    if 'passwd' not in db and 'password' in db:
-        db['passwd'] = db.pop('password')
-
-    db.setdefault('cp_reconnect', True)
-    db.setdefault('charset', 'utf8')
-    db.setdefault('host', 'localhost')
-    db.setdefault('port', 3306)
-
+    normalize_mysql_db_conf(db)
     logger.debug("connecting to mysqldb %r", db.get('db'))
     return MySQLConnectionPool('MySQLdb', **db)
 
 
 def make_pgsql_dbpool(db):
-
     db = dict(db)
-    db.setdefault('cp_reconnect', True)
-    db.setdefault('host', 'localhost')
-    db.setdefault('port', 5432)
-
+    normalize_pgsql_db_conf(db)
     logger.debug("connecting to pgsql %r", db.get('database'))
     return PGSqlConnectionPool('psycopg2', **db)
 

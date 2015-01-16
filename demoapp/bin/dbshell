@@ -1,0 +1,9 @@
+#!/bin/bash
+SCRIPT_DIR=(dirname $(readlink -f $0))
+export PYTHONPATH="$PYTHONPATH:$SCRIPT_DIR/../src"
+python -c '
+import demoapp.app, twoost.dbshell, sys
+demoapp.app.init_demoapp_settings()
+sys.argv[0] = "dbshell"  # hack
+twoost.dbshell.main()
+' "$@"
