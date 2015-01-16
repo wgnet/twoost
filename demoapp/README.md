@@ -17,14 +17,14 @@ Prepare env:
 
     # copy dev configs
     mkdir -p ~/conf
-	cp -r ./conf/dev/ ~/conf
+    cp -r ./conf/dev/ ~/conf
 
     # link nginx config
     sudo sh -c "echo 'include $HOME/conf/nginx/*.conf;' > /etc/nginx/conf.d/$USER.conf"
-	sudo service nginx reload
+    sudo service nginx reload
 
-	# init db, you *should* use migration tools in real apps
-	sqlite3 ~/demoapp_dev.db < "migrations/0001_init.sql"
+    # init db, you *should* use migration tools in real apps
+    sqlite3 ~/demoapp_dev.db < "migrations/0001_init.sql"
 
 
 Start/stop app:
@@ -34,9 +34,9 @@ Start/stop app:
 
 Check app status:
 
-     ./bin/demoapp status
-     # ..or..
-     ./bin/demoapp info --all
+    ./bin/demoapp status
+    # ..or..
+    ./bin/demoapp info --all
 
 
 ## How to use.
@@ -45,19 +45,19 @@ Check app status:
 Simple rpc methods:
 
     curl --header "content-type:application/json" \
-	     --data '[]' \
-         'http://demoapp.local/demoapp/rpc/dumbrpc?method=version'
+        --data '[]' \
+        'http://demoapp.local/demoapp/rpc/dumbrpc?method=version'
 
     curl --header "content-type:application/json" \
-	     --data '["any-string"]' \
-         'http://demoapp.local/demoapp/rpc/dumbrpc?method=echo'
+        --data '["any-string"]' \
+        'http://demoapp.local/demoapp/rpc/dumbrpc?method=echo'
 
 
 Insert new items to db:
 
     curl --header "content-type:application/json" \
-	     --data '["event-data"]' \
-         'http://demoapp.local/demoapp/rpc/dumbrpc?method=new_event'
+        --data '["event-data"]' \
+        'http://demoapp.local/demoapp/rpc/dumbrpc?method=new_event'
 
 
 Use one-shot scripts & tools:
