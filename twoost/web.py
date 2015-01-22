@@ -187,13 +187,6 @@ class DynamicResource(object):
         return reason
 
 
-class _PingResource(LeafResourceMixin, Resource):
-    def render(self, request):
-        logger.debug("ping from %s", request.getClientIP())
-        request.setHeader('cache-control', "no-cache, no-store")
-        return "pong: " + str(time.time())
-
-
 class WSGIResource(_WSGIResource):
 
     "Hacked WSGIResource. Allows serving wsgi apps through unix-socket."
@@ -369,30 +362,15 @@ def buildResourceTree(resources):
 # -- app
 
 
-def putMetaResources(resource):
-    if isinstance(resource, _WSGIResource):
-        logger.warning("unable to add meta resource to WSGIResource %s", resource)
-    try:
-        resource.putChild('_ping', _PingResource())
-        # TODO: add '_version' resource
-        # TODO: add '_health' resource
-    except Exception:
-        logger.exception("unable to add meta resources")
-    return resource
-
-
-def buildSite(restree, prefix=None, add_meta=True):
+def buildSite(restree, prefix=None):
 
     "Build _Site object and add some common resources (ping, version etc)."
 
     if isinstance(restree, _Site):
         assert not prefix
         return restree
+
     root = buildResourceTree(restree)
-
-    if add_meta:
-        putMetaResources(root)
-
     if prefix:
         for pp in reversed(prefix.split("/")):
             root = buildResourceTree({pp: root})
