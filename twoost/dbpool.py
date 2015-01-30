@@ -2,10 +2,13 @@
 
 import os
 import functools
+import collections
 
 from twisted.enterprise.adbapi import ConnectionPool
 from twisted.application import service
 from twisted.python import reflect
+
+from .dbtools import is_pure_db_action, pure_db_action
 
 import logging
 logger = logging.getLogger(__name__)
@@ -32,7 +35,7 @@ class TwoostConnectionPool(ConnectionPool):
             logger.debug("disconnect %r from %s", conn, self._database)
             self.disconnect(conn)
 
-    def retry_on_error(self, e):
+    def is_disconnect_error(self, e):
         return False
 
     def _mk_log(fn):
@@ -42,26 +45,30 @@ class TwoostConnectionPool(ConnectionPool):
             return fn(self, *args, **kwargs)
         return wrapper
 
-    def _mk_retry(fn):
+    def _mk_ri_retry(m):
 
-        @functools.wraps(fn)
-        def wrapper(self, *args, **kwargs):
+        @functools.wraps(m)
+        def wrapper(self, fn, *args, **kwargs):
             try:
-                return fn(self, *args, **kwargs)
+                return m(self, fn, *args, **kwargs)
             except Exception as e:
-                if not self.retry_on_error(e):
+                if not (is_pure_db_action(fn) and self.is_disconnect_error(e)):
                     raise
                 # connection lost etc.
-                logger.exception("retry operation %s(*%s, **%s)", fn.__name__, args, kwargs)
+                logger.warning("retry operation %s(*%s, **%s)", fn.__name__, args, kwargs)
                 self._disconnect_current()
                 return fn(self, *args, **kwargs)
 
         return wrapper
 
-    runQuery = _mk_log(_mk_retry(ConnectionPool.runQuery))
-    runOperation = _mk_log(_mk_retry(ConnectionPool.runOperation))
-    runInteraction = _mk_log(ConnectionPool.runInteraction)
-    runWithConnection = _mk_log(ConnectionPool.runWithConnection)
+    runInteraction = _mk_log(_mk_ri_retry(ConnectionPool.runInteraction))
+    runWithConnection = _mk_log(_mk_ri_retry(ConnectionPool.runWithConnection))
+
+    runQuery = _mk_log(ConnectionPool.runQuery)
+    runOperation = _mk_log(ConnectionPool.runOperation)
+
+    _runQuery = pure_db_action(ConnectionPool._runQuery)
+    _runOperation = pure_db_action(ConnectionPool._runOperation)
 
     def prepare_connection(self, connection):
         if self.cp_init_conn:
@@ -89,7 +96,7 @@ class PGSqlConnectionPool(TwoostConnectionPool):
 
         self._retry_on_errors = (psycopg2.OperationalError, psycopg2.InterfaceError)
 
-    def retry_on_error(self, e):
+    def is_disconnect_error(self, e):
         return isinstance(e, self._retry_on_errors)
 
     def prepare_connection(self, connection):
@@ -120,7 +127,7 @@ class MySQLConnectionPool(TwoostConnectionPool):
 
         self._retry_on_errors = (MySQLdb.OperationalError,)
 
-    def retry_on_error(self, e):
+    def is_disconnect_error(self, e):
         return isinstance(e, self._retry_on_errors) and e[0] in (2006, 2013)
 
 
@@ -191,7 +198,7 @@ def make_dbpool(db):
     return DB_POOL_FACTORY[driver](db)
 
 
-class DatabaseService(service.Service):
+class DatabaseService(service.Service, collections.Mapping):
 
     name = 'dbs'
 
@@ -216,10 +223,21 @@ class DatabaseService(service.Service):
         logger.debug("all dbpools has been destroyed")
         service.Service.stopService(self)
 
-    def __getitem__(self, name):
-        return self.db_pools[name]
-
     def __getstate__(self):
         state = service.Service.__getstate__(self)
         state['db_pools'] = None
         return state
+
+    # -- abstact methods impl
+
+    def __getitem__(self, name):
+        return self.db_pools[name]
+
+    def __contains__(self, name):
+        return name in self.databases
+
+    def __iter__(self):
+        return iter(self.databases)
+
+    def __len__(self):
+        return len(self.databases)

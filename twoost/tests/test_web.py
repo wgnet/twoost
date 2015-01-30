@@ -194,7 +194,7 @@ class RoutingTest(TestCase):
         self.assertNot(r.children)
 
     def test_asis(self):
-        res = web._PingResource()
+        res = TestResource()
         r = web.buildResourceTree(res)
         self.assertIs(res, r)
         self.assertNot(r.children)
