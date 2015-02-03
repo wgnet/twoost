@@ -34,7 +34,7 @@ class WebAPIWorker(AppWorker):
         webapi_service = attach_service(app, WebAPIService(
             queue_event_callback=amqps.makeSender(
                 # routing_key_fn=lambda msg: msg['some_field'],
-                connection='default',
+                # connection='default',
                 exchange='new_event',
             ),
             # we can use various callbacks here
@@ -92,7 +92,6 @@ class StorageWorker(AppWorker):
         ))
 
         amqps.setupQueueConsuming(
-            connection='default',
             queue='incoming_events',
             callback=dbw_service.process_event,
             parallel=5,  # how many messages we can process at the same time

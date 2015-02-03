@@ -710,7 +710,7 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
         return 'amqp'
 
 
-# -- _client factory
+# -- client factory
 
 class AMQPClient(PersistentClientFactory):
 
@@ -973,12 +973,12 @@ class _BaseConsumer(service.Service):
     cancel_consuming_timeout = 5
 
     def __init__(
-            self, _client, callback, parallel=0,
+            self, client, callback, parallel=0,
             no_ack=False, deserialize=True,
             message_reqeue_delay=None,
             hang_rejected_messages=None):
 
-        self._client = _client
+        self.client = client
         self.callback = callback
         self.deserialize = deserialize
         self.parallel = parallel
@@ -1011,14 +1011,15 @@ class QueueConsumer(_BaseConsumer):
 
     """Consumes AMQP queue & runs callback."""
 
-    def __init__(self, _client, queue, callback,
+    def __init__(self, client, queue, callback,
                  *args, **kwargs):
-        _BaseConsumer.__init__(self, _client, callback, *args, **kwargs)
+        _BaseConsumer.__init__(self, client, callback, *args, **kwargs)
         self.queue = queue
 
     def _consume(self):
-        return self._client.consumeQueue(
-            self.queue, self.onMessage,
+        return self.client.consumeQueue(
+            self.queue,
+            self.onMessage,
             parallel=self.parallel,
             no_ack=self.no_ack,
             message_reqeue_delay=self.message_reqeue_delay,
@@ -1029,12 +1030,12 @@ class QueueConsumer(_BaseConsumer):
 class ExchangeConsumer(_BaseConsumer):
 
     """Consumes AMQP exchange & runs callback."""
-    def __init__(self, _client, exchange, callback, *args, **kwargs):
-        _BaseConsumer.__init__(self, _client, callback, *args, **kwargs)
+    def __init__(self, client, exchange, callback, *args, **kwargs):
+        _BaseConsumer.__init__(self, client, callback, *args, **kwargs)
         self.exchange = exchange
 
     def _consume(self):
-        return self._client.consumeExchange(
+        return self.client.consumeExchange(
             self.exchange,
             self.onMessage,
             parallel=self.parallel,
@@ -1073,7 +1074,10 @@ class AMQPService(PersistentClientService):
         return _ClientWithConsumersContainer(s)
 
     def setupQueueConsuming(
-            self, connection, callback, queue,
+            self,
+            queue,
+            callback,
+            connection='default',
             no_ack=False,
             parallel=0,
             deserialize=True,
@@ -1082,7 +1086,7 @@ class AMQPService(PersistentClientService):
     ):
         logger.debug("setup queue consuming for conn %r, queue %r", connection, queue)
         qc = QueueConsumer(
-            _client=self[connection],
+            client=self[connection],
             callback=callback,
             queue=queue,
             parallel=parallel,
@@ -1094,7 +1098,10 @@ class AMQPService(PersistentClientService):
         self.client_services[connection].addService(qc)
 
     def setupExchangeConsuming(
-            self, connection, callback, exchange,
+            self,
+            exchange,
+            callback,
+            connection='default',
             routing_key=None,
             no_ack=False,
             parallel=0,
@@ -1105,7 +1112,7 @@ class AMQPService(PersistentClientService):
         logger.debug("setup exchange consuming for conn %r, exch %r", connection, exchange)
 
         qc = ExchangeConsumer(
-            _client=self[connection],
+            client=self[connection],
             callback=callback,
             exchange=exchange,
             routing_key=routing_key,
@@ -1118,8 +1125,9 @@ class AMQPService(PersistentClientService):
         self.client_services[connection].addService(qc)
 
     def makeSender(
-            self, connection,
+            self,
             exchange='',
+            connection='default',
             routing_key=None,
             routing_key_fn=None,
             content_type='json',
