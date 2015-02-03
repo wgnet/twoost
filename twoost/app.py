@@ -120,14 +120,14 @@ def build_amqps(app, active_connections=None):
     return attach_service(app, amqp.AMQPService(d))
 
 
-def build_web(app, site_or_restree, prefix=None, endpoint=None, add_meta=True):
+def build_web(app, site_or_restree, prefix=None, endpoint=None):
     from twoost import web
     logger.debug("build web service")
     endpoint = endpoint or settings.WEB_ENDPOINT
     if endpoint.startswith("unix:"):
         filename = endpoint[5:]
         mkdir_p(os.path.dirname(filename))
-    site = web.buildSite(site_or_restree, prefix, add_meta=add_meta)
+    site = web.buildSite(site_or_restree, prefix)
     return build_server(app, site, endpoint)
 
 
