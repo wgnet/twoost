@@ -28,7 +28,8 @@ class DefaultSettings(Config):
     EMAIL_HOST = "localhost"
     EMAIL_PORT = 25
 
-    LOGGING_CONFIG = 'logging.config.dictConfig'
+    LOGGING_CONFIG_INIT = 'logging.config.dictConfig'
     LOGGING = {'version': 1}
+    SENTRY_DSN = None
 
     PID_DIR = os.environ.get("TWOOST_PID_DIR") or os.path.expanduser("~/run")

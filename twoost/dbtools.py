@@ -9,10 +9,10 @@ logger = logging.getLogger(__name__)
 __all__ = ['SQL', 'DBUsingMixin', 'single_row', 'single_value']
 
 
-def pure_db_action(f):
+def pure_db_operation(f):
 
     try:
-        f._twoost_pure_db_action = True
+        f._twoost_pure_db_operation = True
     except AttributeError:
         pass
     else:
@@ -21,12 +21,12 @@ def pure_db_action(f):
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
         return f(*args, **kwargs)
-    wrapper._twoost_pure_db_action = True
+    wrapper._twoost_pure_db_operation = True
     return wrapper
 
 
-def is_pure_db_action(f):
-    return getattr(f, '_twoost_pure_db_action', False)
+def is_pure_db_operation(f):
+    return getattr(f, '_twoost_pure_db_operation', False)
 
 
 class SQL(tuple):
@@ -93,17 +93,17 @@ class SQL(tuple):
         sql, args = self
         return "SQL{0!r}".format((sql,) + args)
 
-    @pure_db_action
+    @pure_db_operation
     def execute(self, txn):
         sql, args = self
         txn.execute(sql, args)
 
-    @pure_db_action
+    @pure_db_operation
     def fetch_all(self, txn):
         self.execute(txn)
         return txn.fetchall()
 
-    @pure_db_action
+    @pure_db_operation
     def fetch_one(self, txn):
         self.execute(txn)
         row = txn.fetchone()
@@ -111,7 +111,7 @@ class SQL(tuple):
             raise RuntimeError("expected 1 row")
         return row
 
-    @pure_db_action
+    @pure_db_operation
     def fetch_single(self, txn):
         row = self.fetch_one(txn)
         return _single_coll_element(row)

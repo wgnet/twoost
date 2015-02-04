@@ -8,7 +8,7 @@ from twisted.enterprise.adbapi import ConnectionPool
 from twisted.application import service
 from twisted.python import reflect
 
-from .dbtools import is_pure_db_action, pure_db_action
+from .dbtools import is_pure_db_operation, pure_db_operation
 
 import logging
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ class TwoostConnectionPool(ConnectionPool):
             try:
                 return m(self, fn, *args, **kwargs)
             except Exception as e:
-                if not (is_pure_db_action(fn) and self.is_disconnect_error(e)):
+                if not (is_pure_db_operation(fn) and self.is_disconnect_error(e)):
                     raise
                 # connection lost etc.
                 logger.warning("retry operation %s(*%s, **%s)", fn.__name__, args, kwargs)
@@ -67,8 +67,8 @@ class TwoostConnectionPool(ConnectionPool):
     runQuery = _mk_log(ConnectionPool.runQuery)
     runOperation = _mk_log(ConnectionPool.runOperation)
 
-    _runQuery = pure_db_action(ConnectionPool._runQuery)
-    _runOperation = pure_db_action(ConnectionPool._runOperation)
+    _runQuery = pure_db_operation(ConnectionPool._runQuery)
+    _runOperation = pure_db_operation(ConnectionPool._runOperation)
 
     def prepare_connection(self, connection):
         if self.cp_init_conn:

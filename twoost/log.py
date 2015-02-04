@@ -33,7 +33,7 @@ _log_initialized = False
 
 def _do_logging_config():
     log.msg("Initialize python logging")
-    reflect.namedAny(settings.LOGGING_CONFIG)(settings.LOGGING)
+    reflect.namedAny(settings.LOGGING_CONFIG_INIT)(settings.LOGGING)
 
 
 def _redirect_twisted_log():
