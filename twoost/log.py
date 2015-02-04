@@ -137,9 +137,9 @@ class LoggingSettings(Config):
 
         sentry_dsn = settings.SENTRY_DSN
         if raven and sentry_dsn:
-            conf['root']['handlers']['sentry'] = {
+            conf['handlers']['sentry'] = {
                 'level': 'WARNING',
-                'class': 'raven.contrib.django.raven_compat.handlers.SentryHandler',
+                'class': 'raven.handlers.logging.SentryHandler',
                 'dsn': sentry_dsn,
             }
             conf['root']['handlers'].append('sentry')
