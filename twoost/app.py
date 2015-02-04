@@ -23,7 +23,7 @@ __all__ = [
     'build_web',
     'build_timer',
     'build_manhole',
-    'build_rpc_proxies',
+    'build_rpcps',
     'build_server',
     'build_memcache',
     'AppWorker',
@@ -120,22 +120,22 @@ def build_amqps(app, active_connections=None):
     return attach_service(app, amqp.AMQPService(d))
 
 
-def build_web(app, site_or_restree, prefix=None, endpoint=None):
+def build_web(app, site, prefix=None, endpoint=None):
     from twoost import web
     logger.debug("build web service")
     endpoint = endpoint or settings.WEB_ENDPOINT
     if endpoint.startswith("unix:"):
         filename = endpoint[5:]
         mkdir_p(os.path.dirname(filename))
-    site = web.buildSite(site_or_restree, prefix)
+    site = web.buildSite(site, prefix)
     return build_server(app, site, endpoint)
 
 
-def build_rpc_proxies(app, active_proxies=None):
+def build_rpcps(app, active_proxies=None):
     from twoost import rpcproxy
-    proxies = settings.RPC_PROXIES
+    proxies = subdict(settings.RPC_PROXIES, active_proxies)
     logger.debug("build rpc proxies")
-    return attach_service(app, rpcproxy.RPCProxyService(subdict(proxies, active_proxies)))
+    return attach_service(app, rpcproxy.RPCProxyService(proxies))
 
 
 def build_manhole(app, namespace=None):

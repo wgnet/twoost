@@ -359,12 +359,7 @@ def buildResourceTree(resources):
     return root
 
 
-# -- app
-
-
 def buildSite(restree, prefix=None):
-
-    "Build _Site object and add some common resources (ping, version etc)."
 
     if isinstance(restree, _Site):
         assert not prefix

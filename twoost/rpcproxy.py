@@ -123,7 +123,7 @@ def make_rpc_proxy(params):
 
 class RPCProxyService(service.MultiService):
 
-    name = 'rpc-proxy-service'
+    name = 'rpcps'
 
     def __init__(self, proxies):
         self.proxies = dict(proxies)
@@ -141,7 +141,7 @@ class RPCProxyService(service.MultiService):
 
     def makeCaller(self, method, proxy_name='default'):
         def call(*args):
-            return self[proxy_name].callLater(method, *args)
+            return self[proxy_name].callRemote(method, *args)
         return call
 
     def __getitem__(self, proxy_name):
