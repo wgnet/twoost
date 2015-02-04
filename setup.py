@@ -32,5 +32,6 @@ setup(
         'psutil>=2.0',
         'argparse>=1.2',
         'msgpack-python>=0.4',
+        'raven>=4.0',
     ],
 )

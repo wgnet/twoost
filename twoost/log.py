@@ -6,14 +6,18 @@ import time
 import os
 import sys
 import logging
-
-from stat import ST_DEV, ST_INO
 import errno
 
-from twisted.internet import reactor
+from stat import ST_DEV, ST_INO
+from logging.handlers import TimedRotatingFileHandler
+
+from twisted.internet import reactor, protocol
 from twisted.python import log, reflect, lockfile
 
-from logging.handlers import TimedRotatingFileHandler
+try:
+    import raven
+except ImportError:
+    raven = None
 
 from .conf import settings, Config
 
@@ -130,6 +134,15 @@ class LoggingSettings(Config):
                 'level': level,
             },
         }
+
+        sentry_dsn = settings.SENTRY_DSN
+        if raven and sentry_dsn:
+            conf['root']['handlers']['sentry'] = {
+                'level': 'WARNING',
+                'class': 'raven.contrib.django.raven_compat.handlers.SentryHandler',
+                'dsn': sentry_dsn,
+            }
+            conf['root']['handlers'].append('sentry')
 
         if settings.TWOOST_LOG_TEE_TO_CONSOLE:
             conf['root']['handlers'].append('console')
@@ -290,6 +303,28 @@ class AdminEmailHandler(logging.Handler):
         """
         formatted_subject = subject.replace('\n', '\\n').replace('\r', '\\r')
         return formatted_subject[:989]
+
+
+if raven:
+
+    # `raven.transport.twisted.TwistedUDPTransport` is broken!
+    class TwistedUDPTransport(raven.transport.BaseUDPTransport):
+
+        scheme = ['twisted+udp']
+
+        def __init__(self, parsed_url):
+            super(TwistedUDPTransport, self).__init__(parsed_url)
+            self.protocol = protocol.DatagramProtocol()
+            reactor.listenUDP(0, self.protocol)
+
+        def _send_data(self, data, addr):
+            self.protocol.transport.write(data, addr[4])
+
+    try:
+        raven.Client.register_scheme('twisted+udp', TwistedUDPTransport)
+    except raven.transport.DuplicateScheme:
+        pass
+
 
 # ---
 
