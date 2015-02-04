@@ -2,6 +2,7 @@
 
 import types
 import os
+import uuid
 
 from zope import interface
 from twisted.python import components
@@ -116,48 +117,35 @@ def load_conf_py(fname):
 class ConfigProxy(object):
 
     def __init__(self):
-        self.__current = None
         self.__configs = []
+        self.__reload()
 
     def __getattr__(self, key):
-        c = self.__current
-        if c is None:
-            raise AttributeError
-        else:
-            return getattr(c, key)
+        return getattr(self.__current, key)
 
     def __dir__(self):
-        c = self.__current
-        if c is None:
-            raise AttributeError
-        return dir(c)
+        return dir(self.__current)
 
     def __reload(self):
-        if self.__configs:
-            self.__current = MergedConfig(self.__configs)
-        else:
-            self.__current = None
+        self.__current = MergedConfig([x[1] for x in self.__configs])
 
     def __repr__(self):
-        return "<ConfigProxy: {0!r}>".format(self.__current)
+        return "<ConfigProxy: {0!r}>".format([x[1] for x in self.__configs])
 
     def add_config(self, config):
         """Append new subconfig."""
-        if config is self:
-            return
-        c = IConfig(config)
-        if c not in self.__configs:
-            self.__configs.append(c)
-            self.__reload()
-        return self.__current
+        cf = IConfig(config)
+        cid = uuid.uuid4().hex
+        self.__configs.append((cid, cf))
+        self.__reload()
+        return cid
 
-    def remove_config(self, config):
+    def remove_config(self, conf_id):
         """Remove subconfig, use this method in unit-tests"""
-        c = IConfig(config)
-        if c in self.__configs:
-            self.__configs.remove(c)
-            self.__reload()
-        return self.__current
+        if all(x != conf_id for x, _ in self.__configs):
+            return
+        self.__configs = [x for x in self.__configs if x[0] != conf_id]
+        self.__reload()
 
 # ---
 
