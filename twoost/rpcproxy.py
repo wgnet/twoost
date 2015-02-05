@@ -126,6 +126,7 @@ class RPCProxyService(service.MultiService):
     name = 'rpcps'
 
     def __init__(self, proxies):
+        service.MultiService.__init__(self)
         self.proxies = dict(proxies)
         self.rpc_proxies = {}
 
