@@ -1075,9 +1075,9 @@ class AMQPService(PersistentClientService):
 
     def setupQueueConsuming(
             self,
+            connection,
             queue,
             callback,
-            connection='default',
             no_ack=False,
             parallel=0,
             deserialize=True,
@@ -1099,9 +1099,9 @@ class AMQPService(PersistentClientService):
 
     def setupExchangeConsuming(
             self,
+            connection,
             exchange,
             callback,
-            connection='default',
             routing_key=None,
             no_ack=False,
             parallel=0,
@@ -1126,8 +1126,8 @@ class AMQPService(PersistentClientService):
 
     def makeSender(
             self,
-            exchange='',
-            connection='default',
+            connection,
+            exchange,
             routing_key=None,
             routing_key_fn=None,
             content_type='json',

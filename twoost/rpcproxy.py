@@ -139,9 +139,9 @@ class RPCProxyService(service.MultiService):
                 self.addService(client)
         service.Service.startService(self)
 
-    def makeCaller(self, method, proxy_name='default'):
+    def makeCaller(self, connection, method):
         def call(*args):
-            return self[proxy_name].callRemote(method, *args)
+            return self[connection].callRemote(method, *args)
         return call
 
     def __getitem__(self, proxy_name):
