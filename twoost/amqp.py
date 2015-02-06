@@ -996,7 +996,7 @@ class _BaseConsumer(service.Service):
     def stopService(self):
         logger.debug("stop service %s", self)
         yield timed.timeoutDeferred(
-            self._client.cancelConsuming(self.consumer_key),
+            self.client.cancelConsuming(self.consumer_key),
             self.cancel_consuming_timeout,
         ).addErrback(logger.exception, "Can't cancel consuming")
         service.Service.stopService(self)
