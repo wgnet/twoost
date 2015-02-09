@@ -199,6 +199,8 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
             self, parameters,
             schema=None,
             prefetch_count=None,
+            always_requeue=False,
+            requeue_delay=None,
     ):
 
         logger.debug("construct new _AMQPProtocol (id = %r)...", id(self))
@@ -207,6 +209,8 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
 
         self.schema = schema
         self.prefetch_count = prefetch_count
+        self.always_requeue = always_requeue
+        self.requeue_delay = requeue_delay
 
         self._on_handshaking_made = defer.Deferred()
 
@@ -496,7 +500,7 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
             self._failed_msg_rej_tasks.get(consumer_tag, ()))
 
         if redelivered or rej_tasks_count > self.delayed_rejections_limit:
-            if self._consume_state[consumer_tag].get('hang_rejected_messages'):
+            if self._consume_state[consumer_tag].get('always_requeue'):
                 logger.debug(
                     "message %r already has `redelivered` bit, "
                     "hold it (don't nack nor ack)",
@@ -506,7 +510,7 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
                 ch.basic_reject(delivery_tag, requeue=False)
         else:
             logger.debug("schedule rejection for dt %r", delivery_tag)
-            msg_reject_delay = self._consume_state[consumer_tag].get('message_reqeue_delay') or 0
+            msg_reject_delay = self._consume_state[consumer_tag].get('requeue_delay') or 0
 
             if msg_reject_delay:
 
@@ -532,12 +536,14 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
     @defer.inlineCallbacks
     def consumeQueue(
             self, queue='', callback=None, no_ack=False,
-            message_reqeue_delay=120,
-            hang_rejected_messages=None,
+            requeue_delay=None, always_requeue=None,
             consumer_tag=None, parallel=0, **kwargs):
 
         assert callback
         logger.info("consume messages from queue %r" % queue)
+
+        always_requeue = self.always_requeue if always_requeue is None else always_requeue
+        requeue_delay = self.requeue_delay if requeue_delay is None else requeue_delay
 
         ch = yield self.channel()
         if self.prefetch_count is not None:
@@ -560,8 +566,8 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
             parallel=parallel,
             kwargs=kwargs,
             queue=queue,
-            message_reqeue_delay=(message_reqeue_delay or 0),
-            hang_rejected_messages=(hang_rejected_messages or False),
+            requeue_delay=(requeue_delay or 0),
+            always_requeue=(always_requeue or False),
         )
 
         self._queueCounsumingLoop(
@@ -580,8 +586,8 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
             callback=None, exchange='', no_ack=False,
             parallel=0, consumer_tag=None, routing_key='',
             bind_arguments=None, queue_arguments=None,
-            message_reqeue_delay=None,
-            hang_rejected_messages=None,
+            requeue_delay=None,
+            always_requeue=None,
     ):
 
         logger.debug("declare exclusive queue")
@@ -604,8 +610,8 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
             consumer_tag=consumer_tag,
             parallel=parallel,
             no_ack=no_ack,
-            message_reqeue_delay=message_reqeue_delay,
-            hang_rejected_messages=hang_rejected_messages,
+            requeue_delay=requeue_delay,
+            always_requeue=always_requeue,
         )
 
         self._exclusive_queues[ct] = queue, no_ack
@@ -730,15 +736,20 @@ class AMQPClient(PersistentClientFactory):
             heartbeat=None,
             prefetch_count=None,
             disconnect_period=10800,
-            max_outgoing_queue_size=50000,
-            max_outgoing_messages_delay=250,
+            requeue_delay=120,
+            always_requeue=False,
+            retry_delay=20,
+            retry_max_count=2000,
     ):
-
-        self.schema = schema
+        # setup PersistentClientFactory
         self.disconnectDelay = disconnect_period
+        self.retryMaxCount = retry_max_count
+        self.retryDelay = retry_delay
+
+        # defaults for _AMQPProtocol
         self.prefetch_count = prefetch_count
-        self.max_outgoing_queue_size = max_outgoing_queue_size
-        self.max_outgoing_messages_delay = max_outgoing_messages_delay
+        self.always_requeue = always_requeue
+        self.requeue_delay = requeue_delay
 
         self._protocol_parameters = {
             'virtual_host': vhost,
@@ -750,9 +761,10 @@ class AMQPClient(PersistentClientFactory):
             'connection_attempts': None,
         }
 
-        self._consuming_callbacks = {}
+        self.schema = schema
 
         # transient state
+        self._consuming_callbacks = {}
         self._consumed_queues_is_ready = {}
         self._hm_deffers = []
         self._handshaking_made = False
@@ -788,6 +800,8 @@ class AMQPClient(PersistentClientFactory):
             parameters=self._protocol_parameters,
             schema=self.schema,
             prefetch_count=self.prefetch_count,
+            requeue_delay=self.requeue_delay,
+            always_requeue=self.always_requeue,
         )
 
         self._handshaking_made = False
@@ -975,16 +989,16 @@ class _BaseConsumer(service.Service):
     def __init__(
             self, client, callback, parallel=0,
             no_ack=False, deserialize=True,
-            message_reqeue_delay=None,
-            hang_rejected_messages=None):
+            requeue_delay=None,
+            always_requeue=None):
 
         self.client = client
         self.callback = callback
         self.deserialize = deserialize
         self.parallel = parallel
         self.no_ack = no_ack
-        self.message_reqeue_delay = message_reqeue_delay
-        self.hang_rejected_messages = hang_rejected_messages
+        self.requeue_delay = requeue_delay
+        self.always_requeue = always_requeue
 
     @defer.inlineCallbacks
     def startService(self):
@@ -1022,8 +1036,8 @@ class QueueConsumer(_BaseConsumer):
             self.onMessage,
             parallel=self.parallel,
             no_ack=self.no_ack,
-            message_reqeue_delay=self.message_reqeue_delay,
-            hang_rejected_messages=self.hang_rejected_messages,
+            requeue_delay=self.requeue_delay,
+            always_requeue=self.always_requeue,
         )
 
 
@@ -1040,8 +1054,8 @@ class ExchangeConsumer(_BaseConsumer):
             self.onMessage,
             parallel=self.parallel,
             no_ack=self.no_ack,
-            message_reqeue_delay=self.message_reqeue_delay,
-            hang_rejected_messages=self.hang_rejected_messages,
+            requeue_delay=self.requeue_delay,
+            always_requeue=self.always_requeue,
         )
 
 
@@ -1081,8 +1095,8 @@ class AMQPService(PersistentClientService):
             no_ack=False,
             parallel=0,
             deserialize=True,
-            message_reqeue_delay=120,
-            hang_rejected_messages=False,
+            requeue_delay=120,
+            always_requeue=None,
     ):
         logger.debug("setup queue consuming for conn %r, queue %r", connection, queue)
         qc = QueueConsumer(
@@ -1092,8 +1106,8 @@ class AMQPService(PersistentClientService):
             parallel=parallel,
             no_ack=no_ack,
             deserialize=deserialize,
-            message_reqeue_delay=message_reqeue_delay,
-            hang_rejected_messages=hang_rejected_messages,
+            requeue_delay=requeue_delay,
+            always_requeue=always_requeue,
         )
         self.client_services[connection].addService(qc)
 
@@ -1106,8 +1120,8 @@ class AMQPService(PersistentClientService):
             no_ack=False,
             parallel=0,
             deserialize=True,
-            message_reqeue_delay=120,
-            hang_rejected_messages=False,
+            requeue_delay=120,
+            always_requeue=None,
     ):
         logger.debug("setup exchange consuming for conn %r, exch %r", connection, exchange)
 
@@ -1119,8 +1133,8 @@ class AMQPService(PersistentClientService):
             deserialize=deserialize,
             no_ack=no_ack,
             parallel=parallel,
-            message_reqeue_delay=message_reqeue_delay,
-            hang_rejected_messages=hang_rejected_messages,
+            requeue_delay=requeue_delay,
+            always_requeue=always_requeue,
         )
         self.client_services[connection].addService(qc)
 

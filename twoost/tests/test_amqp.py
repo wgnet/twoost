@@ -204,8 +204,8 @@ class ReconnectTest(BaseTest):
 
         sql = amqp.QueueConsumer(
             self.client, QX, rcv,
-            message_reqeue_delay=0.2,
-            hang_rejected_messages=True,
+            requeue_delay=0.2,
+            always_requeue=True,
         )
         yield sleep(0.1)
 
