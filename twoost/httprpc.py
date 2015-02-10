@@ -150,7 +150,7 @@ class DumbRPCResource(web.LeafResourceMixin, web.Resource):
             resp_body = json.dumps(res)
             request.setHeader(b'content-type', b'application/json')
 
-        logger.debug("call %s", resp_body)
+        logger.debug("result is %r", resp_body)
         defer.returnValue(resp_body)
 
 

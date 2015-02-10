@@ -257,7 +257,7 @@ class GenInit(object):
         np = self.worker_process(workerid)
         return np and np.is_running()
 
-    def _maybe_kill_worker(self, workerid, wait=0.2):
+    def _maybe_kill_worker(self, workerid, wait=0.1):
 
         np = self.worker_process(workerid)
         if not np or not np.is_running():
@@ -272,7 +272,7 @@ class GenInit(object):
         if np.is_running():
             self.log_error("process doesn't respond to SIGKILL, argh!")
 
-    def command_worker_stop(self, workerid, wait=30, kill=False, **kwargs):
+    def command_worker_stop(self, workerid, wait=60, kill=False, **kwargs):
 
         self.log("stop worker {0}", workerid)
 
@@ -404,7 +404,7 @@ class GenInit(object):
         print(int(bool(status)))
         return True
 
-    def command_stop(self, wait=30, kill=False, **kwargs):
+    def command_stop(self, wait=60, kill=False, **kwargs):
 
         all_workes = set(self.load_workerids_from_pidfiles()) | set(self.default_workerids)
         res = True
@@ -523,7 +523,7 @@ class GenInit(object):
         p_stop = argparse.ArgumentParser(add_help=False)
         p_stop.add_argument('--kill', '-k', action='store_true', help="kill with SIGKILL")
         p_stop.add_argument('--wait', '-w', type=float, dest='wait',
-                            default=10, help="wait process termination")
+                            default=60, help="wait process termination")
 
         p_status = argparse.ArgumentParser(add_help=False)
 
