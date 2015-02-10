@@ -172,10 +172,7 @@ class DumbRPCProxy(object):
         uri = self.url + "?method=" + method
 
         body_p = web.StringBodyProducer(body)
-        headers = Headers({
-            b'content-type': [b'application/json'],
-            b'content-length': [len(body)],
-        })
+        headers = Headers({b'content-type': [b'application/json']})
 
         logger.debug("call request to %r, args %r", uri, args)
         resp = yield self.agent.request(

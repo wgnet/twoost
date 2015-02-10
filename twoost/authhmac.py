@@ -15,7 +15,7 @@ import urlparse
 
 import zope.interface
 
-from twisted.internet import defer
+from twisted.internet import defer, reactor
 from twisted.cred import credentials, error
 from twisted.web.iweb import ICredentialFactory, IAgent
 from twisted.web.resource import IResource
@@ -56,7 +56,9 @@ class AuthHMACAgent(object):
 
         if not contentMD5 and bodyProducer is not None:
 
-            bodyConsumer = StringConsumer(callLater=self.agent._reactor.callLater)
+            r = getattr(self.agent, '_reactor') or reactor
+            bodyConsumer = StringConsumer(callLater=r.callLater)
+
             yield bodyProducer.startProducing(bodyConsumer)
             body = bodyConsumer.value()
             bodyProducer = StringBodyProducer(body)
