@@ -32,7 +32,7 @@ class GenInit(object):
 
     workers = 1
     singletone = False
-    disabled = False
+    enabled = True
 
     log_dir = os.path.expanduser("~")
     pid_dir = os.path.expanduser("~")
@@ -237,7 +237,7 @@ class GenInit(object):
 
     def command_worker_start(self, workerid, **kwargs):
 
-        if self.disabled:
+        if not self.enabled:
             self.log_error("app is disabled, can't run {0}", workerid)
             return False
 
@@ -431,7 +431,7 @@ class GenInit(object):
         return res
 
     def command_start(self, **kwargs):
-        if self.disabled:
+        if not self.enabled:
             self.log_error("app {0} is disabled, can't run workers", self.appname)
             return False
         for workerid in self.default_workerids:
