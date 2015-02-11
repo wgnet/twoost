@@ -919,13 +919,6 @@ class AMQPClient(PersistentClientFactory):
                     self._client.cancelConsuming(consumer_tag)
                 del self._consumed_queues_is_ready[consumer_tag]
 
-    def getProtocol(self):
-        # TODO: add list of callbacks
-        if self._amqp and self._handshaking_made and self._client_prepared:
-            return defer.succeed(self._amqp)
-        else:
-            return defer.fail(RuntimeError("no active amqp connection"))
-
 
 # -- config parsing
 

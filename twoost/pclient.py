@@ -207,7 +207,7 @@ class PersistentClientFactory(_SpiriousReconnectingClientFactory):
             m = self._buildProxyMethod(name)
             setattr(self, name, m)
             return m
-        raise AttributeError
+        raise AttributeError(name)
 
     def startFactory(self):
         if not self._delayed_calls:
