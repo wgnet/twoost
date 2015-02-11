@@ -233,9 +233,6 @@ class DatabaseService(service.Service, collections.Mapping):
     def __getitem__(self, name):
         return self.db_pools[name]
 
-    def __contains__(self, name):
-        return name in self.databases
-
     def __iter__(self):
         return iter(self.databases)
 

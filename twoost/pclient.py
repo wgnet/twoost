@@ -267,7 +267,7 @@ class PersistentClientFactory(_SpiriousReconnectingClientFactory):
 
 # --- integration with app-framework
 
-class PersistentClientService(service.MultiService):
+class PersistentClientService(service.MultiService, collections.Mapping):
 
     defaultPort = None
     defaultHost = 'localhost'
@@ -319,5 +319,11 @@ class PersistentClientService(service.MultiService):
         self.client_services[connection] = client_service
         self.addService(client_service)
 
-    def __getitem__(self, connection):
-        return self.clients[connection]
+    def __getitem__(self, name):
+        return self.clients[name]
+
+    def __len__(self):
+        return len(self.clients)
+
+    def __iter__(self):
+        return iter(self.clients)
