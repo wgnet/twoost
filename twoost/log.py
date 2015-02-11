@@ -167,7 +167,7 @@ class TimedRotatingFileHandlerSafe(TimedRotatingFileHandler):
         TimedRotatingFileHandler.__init__(self, *args, **kwargs)
         self.dev, self.ino = -1, -1
         self._statstream()
-        self._flock = lockfile.FilesystemLock(self.baseFilename + "_rotating_lock")
+        self._flock = lockfile.FilesystemLock(self.baseFilename + "~lock")
 
     # stolen from standart WatchedFileHandler
 
