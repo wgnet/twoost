@@ -317,7 +317,7 @@ class GenInit(object):
             return False
 
     def command_worker_status_bool(self, workerid, **kwargs):
-        np = self.get_worker_process(workerid)
+        np = self.worker_process(workerid)
         print(int(bool(np)))
         return True
 
@@ -398,7 +398,7 @@ class GenInit(object):
     def command_status_bool(self, **kwargs):
         active_workerids = set(self.load_workerids_from_pidfiles())
         status = all(
-            self.get_worker_process(workerid)
+            self.worker_process(workerid)
             for workerid in (active_workerids | set(self.default_workerids))
         )
         print(int(bool(status)))
