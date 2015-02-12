@@ -1,6 +1,6 @@
 # coding: utf-8
 
-from twisted.internet import reactor
+from twisted.internet import reactor, defer
 from twisted.application import service
 from twisted.python import reflect
 from twisted.web import client
@@ -33,7 +33,7 @@ class _NoiselessHTTP11ClientFactory(client.HTTPConnectionPool._factory):
     noisy = False
 
 
-class _HTTPPoolClientProxyService(service.Service):
+class _HTTPClientProxyService(service.Service):
 
     def __init__(self, http_pool, proxy):
         self.http_pool = http_pool
@@ -42,10 +42,11 @@ class _HTTPPoolClientProxyService(service.Service):
     def callRemote(self, method, *args):
         return self.proxy.callRemote(method, *args)
 
+    @defer.inlineCallbacks
     def stopService(self):
         logger.debug("close http pool %r", self.http_pool)
-        self.http_pool.closeCachedConnections()
-        return service.Service.stopService(self)
+        yield self.http_pool.closeCachedConnections()
+        yield service.Service.stopService(self)
 
 
 def make_http_pool_and_agent(params):
@@ -85,7 +86,7 @@ def make_xmlrpc_proxy(params):
     http_pool, agent = make_http_pool_and_agent(params)
     logger.debug("create xml-proxy, url %r", url)
     proxy = httprpc.XMLRPCProxy(url, agent=agent, timeout=timeout)
-    return _HTTPPoolClientProxyService(http_pool, proxy)
+    return _HTTPClientProxyService(http_pool, proxy)
 
 
 def make_dumbrpc_proxy(params):
@@ -94,7 +95,7 @@ def make_dumbrpc_proxy(params):
     http_pool, agent = make_http_pool_and_agent(params)
     logger.debug("create dumprpc-proxy, url %r", url)
     proxy = httprpc.DumbRPCProxy(url, agent=agent, timeout=timeout)
-    return _HTTPPoolClientProxyService(http_pool, proxy)
+    return _HTTPClientProxyService(http_pool, proxy)
 
 
 def make_loop_proxy(params):
