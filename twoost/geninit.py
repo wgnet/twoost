@@ -12,6 +12,8 @@ import re
 import time
 import random
 import socket
+import subprocess
+import threading
 
 import psutil
 
@@ -31,8 +33,8 @@ class GenInit(object):
     appname = required_attr
 
     workers = 1
-    singletone = False
     enabled = True
+    singletone = False
 
     log_dir = os.path.expanduser("~")
     pid_dir = os.path.expanduser("~")
@@ -41,6 +43,12 @@ class GenInit(object):
     cwd = os.path.expanduser("~")
 
     flock_timeout = 15
+
+    log_info_prefix = ""
+    log_error_prefix = "! "
+    log_debug_prefix = "# "
+    stdout_sp_prefix = "│ "
+    stderr_sp_prefix = "║ "
 
     def __init__(self):
         assert not self.singletone or self.workers == 1
@@ -54,10 +62,10 @@ class GenInit(object):
         processes = list(processes)
         if not processes:
             return
-        self.log_debug("waiting for processes {0}", [p.pid for p in processes])
+        self.log_debug("waiting for processes %s", [p.pid for p in processes])
 
         if not self._quiet:
-            print("waiting...", end="")
+            self.log_info("waiting...", end="")
             sys.stdout.flush()
 
         end_time = time.time() + timeout
@@ -67,7 +75,7 @@ class GenInit(object):
         while processes and time.time() <= end_time:
 
             if not self._quiet and last_dot_time + 1 < time.time():
-                print(".", end="")
+                self.print(".", end="")
                 last_dot_time = time.time()
                 sys.stdout.flush()
 
@@ -83,10 +91,10 @@ class GenInit(object):
             processes = [p for p in processes if p.is_running()]
 
         if not processes:
-            print(" ok")
+            self.print(" ok")
             return True
         else:
-            print(" fail")
+            self.print(" fail")
 
     @property
     def default_workerids(self):
@@ -99,20 +107,30 @@ class GenInit(object):
     def all_possible_workerids(self):
         return imap(self.coerce_workerid, itertools.count())
 
+    # ---
+
+    def print(self, *args, **kwargs):
+        kwargs.setdefault('sep', "")
+        if not self._quiet:
+            print(*args, **kwargs)
+
     def log_debug(self, msg, *args, **kwargs):
+        kwargs.setdefault('sep', "")
         if self._verbose:
-            print(msg.format(*args, **kwargs))
+            print(self.log_debug_prefix, msg % args, **kwargs)
 
     def log_error(self, msg, *args, **kwargs):
-        print(msg.format(*args, **kwargs), file=sys.stderr)
+        kwargs.setdefault('sep', "")
+        print(self.log_error_prefix, msg % args, file=sys.stderr, **kwargs)
 
-    def log(self, msg, *args, **kwargs):
-        if not self._quiet:
-            print(msg.format(*args, **kwargs))
+    def log_info(self, msg, *args, **kwargs):
+        self.print(self.log_info_prefix, msg % args, **kwargs)
+
+    # ---
 
     def load_workerids_from_pidfiles(self):
 
-        self.log_debug("scan directory {0!r}", self.pid_dir)
+        self.log_debug("scan directory %r", self.pid_dir)
         pat = re.compile(r"(" + re.escape(self.appname) + r".*?)\.pid")
 
         result = []
@@ -124,14 +142,14 @@ class GenInit(object):
                 continue
 
             workerid = m.group(1)
-            self.log_debug("found pidfile {0!r}, workerid {1!r}", fn, workerid)
+            self.log_debug("found pidfile %r, workerid %r", fn, workerid)
 
             p = self.worker_process(workerid)
             if p:
                 result.append(workerid)
                 running_pids.append(p.pid)
             else:
-                self.log_error("stale pidfile {0!r}", fn)
+                self.log_error("stale pidfile %r", fn)
 
         self._check_workers_without_pidfiles(running_pids)
         return result
@@ -145,33 +163,33 @@ class GenInit(object):
                 continue
             workerid = self.workerid_of_process(p)
             if workerid:
-                self.log_error("! hanged worker {0} (pid {1})", workerid, p.pid)
+                self.log_error("hanged worker %s (pid %s)", workerid, p.pid)
 
     def load_worker_pidfile(self, workerid):
 
         pidfile = os.path.join(self.pid_dir, workerid + ".pid")
         if not os.path.exists(pidfile):
-            self.log_debug("no pidfile {0!r}", pidfile)
+            self.log_debug("no pidfile %r", pidfile)
             return None
         with open(pidfile, 'r') as f:
-            self.log_debug("read pidfile {0!r}", pidfile)
+            self.log_debug("read pidfile %r", pidfile)
             pid_str = "".join(f.readlines())
             try:
                 pid = int(pid_str)
             except ValueError:
-                self.log_error("invalid pid {0!r}", pid_str)
+                self.log_error("invalid pid %r", pid_str)
                 return None
 
         try:
             p = psutil.Process(pid)
         except psutil.NoSuchProcess:
-            self.log_debug("no process with pid {0}", pid)
+            self.log_debug("no process with pid %s", pid)
             p = None
 
         if p and self.is_worker_process(workerid, p):
             return pid
         elif self._remove_stale_pidfiles:
-            self.log_error("remove stale pidfile {0!r}", pidfile)
+            self.log_error("remove stale pidfile %r", pidfile)
             os.remove(pidfile)
             return None
 
@@ -206,14 +224,41 @@ class GenInit(object):
         return env
 
     def run_worker_process(self, workerid):
+
         cmdline_list = self.create_worker_command_line(workerid)
-        stdout = sys.stdout
-        stderr = sys.stderr
+        stdout = subprocess.PIPE
+        stderr = subprocess.PIPE
+        stdin = sys.stdin
         cwd = self.cwd
         env = self.create_worker_environ(workerid)
-        self.log_debug("env is {0!r}", env)
-        self.log_debug("run {0!r}", cmdline_list)
-        return psutil.Popen(cmdline_list, stdout=stdout, stderr=stderr, cwd=cwd, env=env)
+
+        self.log_debug("env is %r", env)
+        self.log_debug("run %r", cmdline_list)
+
+        return psutil.Popen(
+            cmdline_list,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            cwd=cwd,
+            env=env,
+        )
+
+    def _dump_stream_in_background(self, si, so, nl_prefix=""):
+
+        def do_dumb():
+            for line in si:
+                so.write(nl_prefix or "")
+                so.write(line)
+
+        t = threading.Thread(target=do_dumb)
+        t.daemon = True
+        t.start()
+
+    def wait_worker_process(self, process):
+        self._dump_stream_in_background(process.stdout, sys.stdout, self.prefix_subprocess_stdoud)
+        self._dump_stream_in_background(process.stderr, sys.stderr, self.stderr_sp_prefix)
+        return process.wait(timeout=60)
 
     def create_worker_command_line(self, workerid):
         raise NotImplementedError
@@ -238,21 +283,21 @@ class GenInit(object):
     def command_worker_start(self, workerid, **kwargs):
 
         if not self.enabled:
-            self.log_error("app is disabled, can't run {0}", workerid)
+            self.log_error("app is disabled, can't run %s", workerid)
             return False
 
-        self.log("start worker {0}", workerid)
+        self.log_info("start worker %s", workerid)
 
         np = self.worker_process(workerid)
         if np and np.is_running():
-            self.log_error("worker {0} is already running", workerid)
+            self.log_error("worker %s is already running", workerid)
             return False
 
         p = self.run_worker_process(workerid)
         self.log_debug("wait twistd...")
-        exit_code = p.wait(timeout=60)
+        exit_code = self.wait_worker_process(p)
         if exit_code:
-            self.log_error("command terimnated with exit code {0}", exit_code)
+            self.log_error("command terimnated with exit code %s", exit_code)
 
         np = self.worker_process(workerid)
         return np and np.is_running()
@@ -263,7 +308,7 @@ class GenInit(object):
         if not np or not np.is_running():
             return
 
-        self.log("kill process {0}", np.pid)
+        self.log_info("kill process %s", np.pid)
         np.kill()
         if not wait:
             return
@@ -274,11 +319,11 @@ class GenInit(object):
 
     def command_worker_stop(self, workerid, wait=60, kill=False, **kwargs):
 
-        self.log("stop worker {0}", workerid)
+        self.log_info("stop worker %s", workerid)
 
         np = self.worker_process(workerid)
         if not np or not np.is_running():
-            self.log_error("worker {0} is already down!", workerid)
+            self.log_error("worker %s is already down!", workerid)
             return False
 
         children = np.children()
@@ -298,27 +343,27 @@ class GenInit(object):
         if not np.is_running():
             for c in children:
                 if c.is_running():
-                    self.log_error("! child process still alive (pid {0})", c.pid)
+                    self.log_error("! child process still alive (pid %s)", c.pid)
 
         return result
 
     def command_worker_status(self, workerid, **kwargs):
-        self.log_debug("check command_status of worker {0}", workerid)
+        self.log_debug("check command_status of worker %s", workerid)
         np = self.worker_process(workerid)
         if workerid in set(self.default_workerids):
             worker_name = workerid
         else:
             worker_name = workerid + "*"
         if np:
-            self.log("worker {0} is running (pid {1})", worker_name, np.pid)
+            self.log_info("worker %s is running (pid %s)", worker_name, np.pid)
             return True
         else:
-            self.log("worker {0} is down", worker_name)
+            self.log_info("worker %s is down", worker_name)
             return False
 
     def command_worker_status_bool(self, workerid, **kwargs):
         np = self.worker_process(workerid)
-        print(int(bool(np)))
+        self.print(int(bool(np)))
         return True
 
     def command_worker_restart(self, **kwargs):
@@ -327,12 +372,12 @@ class GenInit(object):
 
     def command_worker_info(self, workerid, all=False, nowait=False, **kwargs):
 
-        self.log_debug("show process info for worker {0}", workerid)
+        self.log_debug("show process info for worker %s", workerid)
         np = self.worker_process(workerid)
 
         if not np:
-            self.log("worker {0} is down", workerid)
-            self.log("")
+            self.log_info("worker %s is down", workerid)
+            self.log_info("")
             return False
 
         mi = np.memory_info()
@@ -355,31 +400,31 @@ class GenInit(object):
         )
 
         if not all:
-            self.log("worker {0}: \t{1}", workerid, info)
+            self.log_info("worker %s: \t%s", workerid, info)
             return True
         else:
-            self.log("worker {0}:", workerid)
-            self.log("{0}", info)
+            self.log_info("worker %s:", workerid)
+            self.log_info("%s", info)
 
         connections = np.connections('all')
-        self.log("connections {0}", len(connections))
+        self.log_info("connections %s", len(connections))
         for c in connections:
             ctype = {socket.SOCK_STREAM: "STREAM", socket.SOCK_DGRAM: "DGRAM"}[c.type]
             cfamily = {socket.AF_INET: "INET",
                        socket.AF_INET6: "INET6",
                        socket.AF_UNIX: "UNIX"}[c.family]
-            self.log(
+            self.log_info(
                 "\t{cfamily}/{ctype}\t{status}\tlocal {laddr} - remote {raddr}",
                 status=c.status, cfamily=cfamily, ctype=ctype,
                 laddr=c.laddr, raddr=c.raddr,
             )
 
         openfiles = np.open_files()
-        self.log("open files {0}", len(openfiles))
+        self.log_info("open files %s", len(openfiles))
         for of in np.open_files():
-            self.log("\t{0!r}", of.path)
+            self.log_info("\t%r", of.path)
 
-        self.log("")
+        self.log_info("")
         return True
 
     def command_restart_worker(self, workerid, **kwargs):
@@ -401,7 +446,7 @@ class GenInit(object):
             self.worker_process(workerid)
             for workerid in (active_workerids | set(self.default_workerids))
         )
-        print(int(bool(status)))
+        self.print(int(bool(status)))
         return True
 
     def command_stop(self, wait=60, kill=False, **kwargs):
@@ -432,7 +477,7 @@ class GenInit(object):
 
     def command_start(self, **kwargs):
         if not self.enabled:
-            self.log_error("app {0} is disabled, can't run workers", self.appname)
+            self.log_error("app %s is disabled, can't run workers", self.appname)
             return False
         for workerid in self.default_workerids:
             self.command_worker_start(workerid=workerid, **kwargs)
@@ -460,16 +505,16 @@ class GenInit(object):
         return x
 
     def command_add_worker(self, **kwargs):
-        self.log("add new worker")
+        self.log_info("add new worker")
         workerids = set(self.load_workerids_from_pidfiles())
         for workerid in self.all_possible_workerids:
             if workerid in workerids:
-                self.log_debug("worker {0} already running", workerid)
+                self.log_debug("worker %s already running", workerid)
                 continue
             return self.command_worker_start(workerid=workerid, **kwargs)
 
     def command_remove_worker(self, **kwargs):
-        self.log("remove worker")
+        self.log_info("remove worker")
         workers = list(natural_sorted(self.load_workerids_from_pidfiles()))
         if not workers:
             self.log_error("no workers running")
@@ -496,7 +541,7 @@ class GenInit(object):
 
     def command_num_workers(self, **kwargs):
         nps = self.load_workerids_from_pidfiles()
-        self.log("{0}", len(list(nps)))
+        self.log_info("%s", len(list(nps)))
 
     def coerce_workerid(self, s):
         s = str(s)
@@ -561,10 +606,10 @@ class GenInit(object):
                 v = getattr(parsed_args, f)
                 if v is None:
                     continue
-                self.log_debug("set option `{0}` to {1!r}", f, v)
+                self.log_debug("set option `%s` to %r", f, v)
                 setattr(self, f, v)
 
-    def _create_dirs(self):
+    def create_dirs(self):
         mkdir_p(self.log_dir)
         mkdir_p(self.pid_dir)
 
@@ -579,7 +624,7 @@ class GenInit(object):
             return
 
         if not self._quiet:
-            print("acquire lock...", end="")
+            self.log_info("acquire lock...", end="")
             sys.stdout.flush()
 
         end_time = time.time() + self.flock_timeout
@@ -594,7 +639,7 @@ class GenInit(object):
 
             time.sleep(step)
             if not self._quiet and last_dot_time + 1 < time.time():
-                print(".", end="")
+                self.print(".", end="")
                 last_dot_time = time.time()
                 sys.stdout.flush()
 
@@ -602,7 +647,7 @@ class GenInit(object):
 
     def main(self, args=None):
 
-        self._create_dirs()
+        self.create_dirs()
         parser = self.create_parser()
         lock = self._make_flock()
 
@@ -610,7 +655,7 @@ class GenInit(object):
         self.process_command_args(parsed_args)
 
         command_name = parsed_args.command
-        self.log_debug("run command {0!r}", command_name)
+        self.log_debug("run command %r", command_name)
         command = getattr(self, 'command_' + command_name)
 
         self._acquire_flock(lock)
@@ -619,8 +664,11 @@ class GenInit(object):
         finally:
             lock.unlock()
 
-        self.log_debug("exit with code {0}", int(not x))
-        sys.exit(not x)
+        self.exit(int(not x))
+
+    def exit(self, code):
+        self.log_debug("exit with code %s", code)
+        sys.exit(code)
 
 
 # -- integration with twisted
@@ -662,6 +710,7 @@ class Worker(TwistedGenInit):
         return env
 
     def create_twisted_application(self):
+        self.log_debug("create twistd application")
         workerid = os.environ['TWOOST_WORKERID']
         return self.create_app(workerid)
 
