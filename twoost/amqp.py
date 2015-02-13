@@ -1076,9 +1076,15 @@ class AMQPService(PersistentClientService):
 
     # ---
 
-    def buildClientService(self, clientFactory, params):
-        s = PersistentClientService.buildClientService(self, clientFactory, params)
-        return _ClientWithConsumersContainer(s)
+    def __init__(self, *args, **kwargs):
+        self._connection_to_client_serivece_map = {}
+        PersistentClientService.__init__(self, *args, **kwargs)
+
+    def buildClientService(self, connection, clientFactory, params):
+        s = PersistentClientService.buildClientService(self, connection, clientFactory, params)
+        ss = _ClientWithConsumersContainer(s)
+        self._connection_to_client_serivece_map[connection] = ss
+        return ss
 
     def setupQueueConsuming(
             self,
@@ -1102,7 +1108,7 @@ class AMQPService(PersistentClientService):
             requeue_delay=requeue_delay,
             always_requeue=always_requeue,
         )
-        self.client_services[connection].addService(qc)
+        self._connection_to_client_serivece_map[connection].addService(qc)
 
     def setupExchangeConsuming(
             self,
@@ -1129,7 +1135,7 @@ class AMQPService(PersistentClientService):
             requeue_delay=requeue_delay,
             always_requeue=always_requeue,
         )
-        self.client_services[connection].addService(qc)
+        self._connection_to_client_serivece_map[connection].addService(qc)
 
     def makeSender(
             self,
