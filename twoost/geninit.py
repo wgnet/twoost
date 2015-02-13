@@ -42,13 +42,8 @@ class GenInit(object):
     env = None
     cwd = os.path.expanduser("~")
 
-    flock_timeout = 15
-
-    log_info_prefix = ""
-    log_error_prefix = "! "
-    log_debug_prefix = "# "
-    stdout_sp_prefix = "│ "
-    stderr_sp_prefix = "║ "
+    flock_timeout = 90
+    run_worker_timeout = 60
 
     def __init__(self):
         assert not self.singletone or self.workers == 1
@@ -66,7 +61,6 @@ class GenInit(object):
 
         if not self._quiet:
             self.log_info("waiting...", end="")
-            sys.stdout.flush()
 
         end_time = time.time() + timeout
         step = 0.2
@@ -77,7 +71,6 @@ class GenInit(object):
             if not self._quiet and last_dot_time + 1 < time.time():
                 self.print(".", end="")
                 last_dot_time = time.time()
-                sys.stdout.flush()
 
             pr = random.choice(processes)
             try:
@@ -110,21 +103,27 @@ class GenInit(object):
     # ---
 
     def print(self, *args, **kwargs):
-        kwargs.setdefault('sep', "")
         if not self._quiet:
             print(*args, **kwargs)
+            kwargs.get('file', sys.stdout).flush()
 
     def log_debug(self, msg, *args, **kwargs):
-        kwargs.setdefault('sep', "")
         if self._verbose:
-            print(self.log_debug_prefix, msg % args, **kwargs)
+            print("│!", msg % args, **kwargs)
+            kwargs.get('file', sys.stdout).flush()
 
     def log_error(self, msg, *args, **kwargs):
-        kwargs.setdefault('sep', "")
-        print(self.log_error_prefix, msg % args, file=sys.stderr, **kwargs)
+        print("│!", msg % args, file=sys.stderr, **kwargs)
+        sys.stderr.flush()
 
     def log_info(self, msg, *args, **kwargs):
-        self.print(self.log_info_prefix, msg % args, **kwargs)
+        self.print("│ ", msg % args, **kwargs)
+
+    def print_header(self):
+        self.print("┌────", self.appname, "────")
+
+    def print_footer(self):
+        self.print()
 
     # ---
 
@@ -244,21 +243,20 @@ class GenInit(object):
             env=env,
         )
 
-    def _dump_stream_in_background(self, si, so, nl_prefix=""):
+    def _dump_worker_output(self, sin, sout):
+        for line in sin:
+            sout.write("│ ║ ")
+            sout.write(line)
 
-        def do_dumb():
-            for line in si:
-                so.write(nl_prefix or "")
-                so.write(line)
-
-        t = threading.Thread(target=do_dumb)
+    def _fire_worker_output_dumping(self, si, so):
+        t = threading.Thread(target=self._dump_worker_output, args=(si, so))
         t.daemon = True
         t.start()
 
     def wait_worker_process(self, process):
-        self._dump_stream_in_background(process.stdout, sys.stdout, self.prefix_subprocess_stdoud)
-        self._dump_stream_in_background(process.stderr, sys.stderr, self.stderr_sp_prefix)
-        return process.wait(timeout=60)
+        self._fire_worker_output_dumping(process.stdout, sys.stdout)
+        self._fire_worker_output_dumping(process.stderr, sys.stderr)
+        return process.wait(timeout=self.run_worker_timeout)
 
     def create_worker_command_line(self, workerid):
         raise NotImplementedError
@@ -414,10 +412,10 @@ class GenInit(object):
                        socket.AF_INET6: "INET6",
                        socket.AF_UNIX: "UNIX"}[c.family]
             self.log_info(
-                "\t{cfamily}/{ctype}\t{status}\tlocal {laddr} - remote {raddr}",
-                status=c.status, cfamily=cfamily, ctype=ctype,
-                laddr=c.laddr, raddr=c.raddr,
-            )
+                "\t{cfamily}/{ctype}\t{status}\tlocal {laddr} - remote {raddr}".format(
+                    status=c.status, cfamily=cfamily, ctype=ctype,
+                    laddr=c.laddr, raddr=c.raddr,
+                ))
 
         openfiles = np.open_files()
         self.log_info("open files %s", len(openfiles))
@@ -625,7 +623,6 @@ class GenInit(object):
 
         if not self._quiet:
             self.log_info("acquire lock...", end="")
-            sys.stdout.flush()
 
         end_time = time.time() + self.flock_timeout
         step = 0.2
@@ -634,6 +631,7 @@ class GenInit(object):
         while time.time() <= end_time:
 
             if lock.lock():
+                self.print(" ok")
                 self.log_debug("flock has been acquired")
                 return
 
@@ -641,11 +639,12 @@ class GenInit(object):
             if not self._quiet and last_dot_time + 1 < time.time():
                 self.print(".", end="")
                 last_dot_time = time.time()
-                sys.stdout.flush()
 
-        self.log_error("there is another running geninit process")
+        self.print(" fail")
+        self.log_error("there is another active geninit process")
 
     def main(self, args=None):
+        self.print_header()
 
         self.create_dirs()
         parser = self.create_parser()
@@ -664,6 +663,7 @@ class GenInit(object):
         finally:
             lock.unlock()
 
+        self.print_footer()
         self.exit(int(not x))
 
     def exit(self, code):
