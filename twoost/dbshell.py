@@ -1,5 +1,7 @@
 # coding: utf-8
 
+from __future__ import print_function
+
 import argparse
 import subprocess
 import sys
@@ -121,10 +123,18 @@ def create_argparser():
 
 
 def main(argv=None):
+
     if argv is None:
         argv = sys.argv[1:]
     pa = create_argparser().parse_args(argv)
     database = pa.database
+
+    if database not in settings.DATABASES:
+        print(
+            "Unknown db %r, available dbs: %r" % (database, settings.DATABASES.keys()),
+            file=sys.stderr)
+        sys.exit(1)
+
     return run_dbshell(settings.DATABASES[database])
 
 
