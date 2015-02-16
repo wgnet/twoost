@@ -245,7 +245,7 @@ class GenInit(object):
 
     def _dump_worker_output(self, sin, sout):
         for line in sin:
-            sout.write("│ ║ ")
+            sout.write("│║")
             sout.write(line)
 
     def _fire_worker_output_dumping(self, si, so):

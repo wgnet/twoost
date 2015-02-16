@@ -46,7 +46,13 @@ def _run_pgsql_dbshell_with_tf(db, tf):
         args.append(database)
 
     if password:
-        quote = lambda x: x.replace("\\", "\\\\").replace(":", "\\:") if x else "*"
+
+        def quote(x):
+            if x:
+                return x.replace("\\", "\\\\").replace(":", "\\:")
+            else:
+                return "*"
+
         tf.write("{host}:*:{db}:{user}:{password}\n".format(
             host=quote(host),
             db=quote(database),
@@ -74,7 +80,7 @@ def _run_mysql_dbshell_with_tf(db, tf):
     port = db.get('port')
 
     args = ["mysql"]
-    args.appent("--defaults-file=%s" % tf.name)
+    args.append("--defaults-file=%s" % tf.name)
 
     if user:
         args.append("--user=%s" % user)
