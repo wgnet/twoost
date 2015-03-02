@@ -109,7 +109,7 @@ class GenInit(object):
 
     def log_debug(self, msg, *args, **kwargs):
         if self._verbose:
-            print("│!", msg % args, **kwargs)
+            print("│ ", msg % args, **kwargs)
             kwargs.get('file', sys.stdout).flush()
 
     def log_error(self, msg, *args, **kwargs):
@@ -201,11 +201,11 @@ class GenInit(object):
                 d = f.read()
         except IOError:
             return {}
-
         lines = d.strip(b"\0").split(b"\0")
         return dict(
             line.split(b"=", 1)
             for line in lines
+            if b"=" in line
         )
 
     def workerid_of_process(self, p):
@@ -245,7 +245,7 @@ class GenInit(object):
 
     def _dump_worker_output(self, sin, sout):
         for line in sin:
-            sout.write("│║")
+            sout.write("│ ║")
             sout.write(line)
 
     def _fire_worker_output_dumping(self, si, so):
