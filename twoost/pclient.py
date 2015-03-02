@@ -239,7 +239,7 @@ class PersistentClientFactory(_SpiriousReconnectingClientFactory):
         return p
 
     def clientConnectionLost(self, connector, reason):
-        logger.debug("connection due to %r", reason)
+        logger.debug("connection lost: %s", reason)
         self.client = None
         _SpiriousReconnectingClientFactory.clientConnectionLost(self, connector, reason)
 
@@ -267,37 +267,41 @@ class PersistentClientFactory(_SpiriousReconnectingClientFactory):
 
 # --- integration with app-framework
 
-class PersistentClientService(service.Service, collections.Mapping):
+
+class ClientFactoryWithService(service.Service):
+
+    def __init__(self, client, connector):
+        self.client = client
+        self.connector = connector
+
+    def startService(self):
+        service.Service.startService(self)
+        self.connector.startService()
+
+    def stopService(self):
+        self.client.stopTrying()
+        service.Service.stopService(self)
+        return self.connector.stopService()
+
+
+class PersistentClientService(service.MultiService):
 
     defaultPort = None
     defaultHost = 'localhost'
     factory = required_attr
 
     def __init__(self, connections):
-        self._clients = {}
-        self._client_services = service.MultiService()
-
+        service.MultiService.__init__(self)
         self.connections = dict(connections)
         for connection, cparams in self.connections.items():
             self._initClientService(connection, cparams)
 
-    def startService(self):
-        self._client_services.startService()
-        return service.Service.startService(self)
-
-    @defer.inlineCallbacks
-    def stopService(self):
-        for c in self._clients.values():
-            if isinstance(c, protocol.ReconnectingClientFactory):
-                c.stopTrying()
-        yield self._client_services.stopService()
-        yield defer.maybeDeferred(service.Service.stopService, self)
-
-    def buildClientService(self, connection, clientFactory, params):
+    def buildClientService(self, clientFactory, params):
         if 'endpoint' in params:
             assert 'host' not in params
             assert 'port' not in params
             endpoint = params['endpoint']
+            # XXX
             return StreamServerEndpointService(endpoint, clientFactory)
         else:
             assert 'endpoint' not in params
@@ -305,7 +309,7 @@ class PersistentClientService(service.Service, collections.Mapping):
             port = params.get('port', self.defaultPort)
             return TCPClient(host, port, clientFactory)
 
-    def buildClientFacotry(self, connection, params):
+    def buildClientFactory(self, params):
         params = dict(params)
         params.pop('endpoint', None)
         params.pop('host', None)
@@ -314,18 +318,13 @@ class PersistentClientService(service.Service, collections.Mapping):
 
     def _initClientService(self, connection, params):
         logger.debug("init client service %r, params %r", connection, params)
-        client = self.buildClientFacotry(connection, params)
-        if service.IService.providedBy(client):
-            self.addService(client)
-        self._clients[connection] = client
-        client_service = self.buildClientService(connection, client, params)
-        self._client_services.addService(client_service)
+
+        client = self.buildClientFactory(params)
+        service = self.buildClientService(client, params)
+
+        s = ClientFactoryWithService(client, service)
+        s.setName(connection)
+        self.addService(s)
 
     def __getitem__(self, name):
-        return self._clients[name]
-
-    def __len__(self):
-        return len(self._clients)
-
-    def __iter__(self):
-        return iter(self._clients)
+        return self.getServiceNamed(name).client

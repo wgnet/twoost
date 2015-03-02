@@ -74,8 +74,8 @@ def _dlistIgnoreSomeErrors(ls):
 
 class _MemCacheMultiClientProxy(object):
 
-    def __init__(self, clients, resolveClientNameByKey):
-        self.clients = clients
+    def __init__(self, memcaches, resolveClientNameByKey):
+        self.memcaches = memcaches
         self.resolveClientNameByKey = resolveClientNameByKey
 
     def __buildProxyMethod(name):
@@ -83,7 +83,7 @@ class _MemCacheMultiClientProxy(object):
         def method(self, key, *args, **kwargs):
             cname = self.resolveClientNameByKey(key)
             try:
-                client = self.clients[cname]
+                client = self.memcaches[cname]
             except KeyError:
                 raise ValueError("unknown memcache server", cname)
             return getattr(client, name)(key, *args, **kwargs)
@@ -107,12 +107,19 @@ class _MemCacheMultiClientProxy(object):
 
         clients = sorted((self.resolveClientNameByKey(k), k) for k in keys)
         for cname, _ in clients:
-            if cname not in self.clients:
+            try:
+                self.memcaches[cname]
+            except LookupError:
                 raise ValueError("unknown memcache server", cname)
 
         ds = [
-            self.clients[cn].getMultiple([x[1] for x in ckeys], withIdentifier)
-            for cn, ckeys in itertools.groupby(clients, lambda x: x[0])]
+            defer.maybeDeferred(
+                self.memcaches[cn].getMultiple,
+                [x[1] for x in ckeys],
+                withIdentifier,
+            )
+            for cn, ckeys in itertools.groupby(clients, lambda x: x[0])
+        ]
         dl = defer.DeferredList(
             ds,
             fireOnOneErrback=(not ignoreErrors),
@@ -135,8 +142,9 @@ class _MemCacheMultiClientProxy(object):
 
 class MemCacheService(PersistentClientService):
 
+    name = 'memcaches'
     factory = MemCacheFactory
     defaultPort = 11211
 
     def multiClient(self, resolveClientNameByKey):
-        return _MemCacheMultiClientProxy(self.clients, resolveClientNameByKey)
+        return _MemCacheMultiClientProxy(self, resolveClientNameByKey)

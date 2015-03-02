@@ -10,7 +10,7 @@ from twisted.internet import defer, error
 from twisted.application.service import Application, IService
 from twisted.trial.unittest import TestCase
 
-from twoost import memcache, app, conf, timed, pclient
+from twoost import app, conf, timed
 
 
 def gr(n):

@@ -2,7 +2,6 @@
 
 import os
 import functools
-import collections
 
 from twisted.enterprise.adbapi import ConnectionPool
 from twisted.application import service
@@ -17,7 +16,7 @@ logger = logging.getLogger(__name__)
 __all__ = ['DatabaseService', 'make_dbpool']
 
 
-class TwoostConnectionPool(ConnectionPool):
+class TwoostConnectionPool(ConnectionPool, service.Service):
 
     reconnect = True
     init_conn = None
@@ -28,6 +27,9 @@ class TwoostConnectionPool(ConnectionPool):
         self._database = kwargs.get('database') or kwargs.get('db')
         if isinstance(self.cp_init_conn, basestring):
             self.cp_init_conn = reflect.namedAny(self.cp_init_conn)
+
+    def stopService(self):
+        self.close()
 
     def _disconnect_current(self):
         conn = self.connections.get(self.threadID())
@@ -198,43 +200,23 @@ def make_dbpool(db):
     return DB_POOL_FACTORY[driver](db)
 
 
-class DatabaseService(service.Service, collections.Mapping):
+class DatabaseService(service.MultiService):
 
     name = 'dbs'
 
     def __init__(self, databases):
-        self.databases = dict(databases)
-        self.db_pools = {}
 
-    def startService(self):
-        service.Service.startService(self)
+        service.MultiService.__init__(self)
+        self.databases = dict(databases)
+
         logger.debug("create dbpools...")
         for db_name, db in self.databases.items():
             logger.info("connect to db %r", db_name)
             dbpool = make_dbpool(db)
-            self.db_pools[db_name] = dbpool
+            dbpool.setName(db_name)
+            self.addService(dbpool)
+
         logger.debug("all dbpools has been created")
 
-    def stopService(self):
-        logger.debug("destroy dbpools...")
-        for db, dbpool in self.db_pools.items():
-            logger.debug("close dbpool %r", db)
-            dbpool.close()
-        logger.debug("all dbpools has been destroyed")
-        service.Service.stopService(self)
-
-    def __getstate__(self):
-        state = service.Service.__getstate__(self)
-        state['db_pools'] = None
-        return state
-
-    # -- abstact methods impl
-
     def __getitem__(self, name):
-        return self.db_pools[name]
-
-    def __iter__(self):
-        return iter(self.databases)
-
-    def __len__(self):
-        return len(self.databases)
+        return self.getServiceNamed(name)

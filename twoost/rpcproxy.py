@@ -45,8 +45,8 @@ class _HTTPClientProxyService(service.Service):
     @defer.inlineCallbacks
     def stopService(self):
         logger.debug("close http pool %r", self.http_pool)
-        yield self.http_pool.closeCachedConnections()
-        yield service.Service.stopService(self)
+        yield defer.maybeDeferred(self.http_pool.closeCachedConnections)
+        yield defer.maybeDeferred(service.Service.stopService, self)
 
 
 def make_http_pool_and_agent(params):
@@ -127,19 +127,16 @@ class RPCProxyService(service.MultiService):
     name = 'rpcps'
 
     def __init__(self, proxies):
+
         service.MultiService.__init__(self)
         self.proxies = dict(proxies)
-        self.rpc_proxies = {}
+        logger.debug("create rpc proxies...")
 
-    def startService(self):
-        logger.debug("create rpc_proxies...")
         for client_name, params in self.proxies.items():
             logger.info("connect to %r, params %r", client_name, params)
             client = make_rpc_proxy(params)
-            self.rpc_proxies[client_name] = client
-            if service.IService.providedBy(client):
-                self.addService(client)
-        service.Service.startService(self)
+            client.setName(client_name)
+            self.addService(client)
 
     def makeCaller(self, connection, method):
         def call(*args):
@@ -147,9 +144,4 @@ class RPCProxyService(service.MultiService):
         return call
 
     def __getitem__(self, proxy_name):
-        return self.rpc_proxies[proxy_name]
-
-    def __getstate__(self):
-        state = service.Service.__getstate__(self)
-        state['rpc_proxies'] = None
-        return state
+        return self.getServiceNamed(proxy_name)

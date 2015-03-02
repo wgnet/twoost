@@ -51,7 +51,7 @@ class SqlitePoolTest(TestCase):
         })
         dbs.startService()
 
-        self.assertEquals(3, len(dbs.db_pools))
+        self.assertEquals(3, len(list(dbs)))
         self.assertIsInstance(dbs['db1'], dbpool.SQLiteConnectionPool)
         self.assertIsInstance(dbs['db2'], dbpool.SQLiteConnectionPool)
         self.assertIsInstance(dbs['db3'], dbpool.SQLiteConnectionPool)

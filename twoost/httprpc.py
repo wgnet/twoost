@@ -206,6 +206,7 @@ class XMLRPCProxy(object):
 
     def __init__(self, url, agent=None, timeout=60,
                  xmlrpclib_use_datetime=False, xmlrpclib_allow_none=True):
+
         self.url = url
         self.timeout = timeout
         self.agent = agent or client.Agent(reactor)
