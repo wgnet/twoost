@@ -21,9 +21,13 @@ from twisted.web.iweb import ICredentialFactory, IAgent
 from twisted.web.resource import IResource
 from twisted.web.http import stringToDatetime, datetimeToString
 from twisted.web.http_headers import Headers
-from twisted.web.client import _URI
 
 from twoost.web import StringBodyProducer, StringConsumer
+
+try:
+    from twisted.web.client import URI
+except ImportError:
+    from twisted.web.client import _URI as URI
 
 
 @zope.interface.implementer(IAgent)
@@ -51,7 +55,7 @@ class AuthHMACAgent(object):
         date = headers.getRawHeaders('date', [""])[0] or self._generateRequestDate(uri)
         headers.setRawHeaders('date', [date])
 
-        uri_origin_form = _URI.fromBytes(uri).originForm
+        uri_origin_form = URI.fromBytes(uri).originForm
         contentMD5 = headers.getRawHeaders('content-md5', [""])[0]
 
         if not contentMD5 and bodyProducer is not None:
