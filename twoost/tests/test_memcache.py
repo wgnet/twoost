@@ -32,7 +32,7 @@ class MemcacheTestCase(TestCase):
                 'c2': {'host': 'localhost'},
             },
         }
-        conf.settings.add_config(self.config)
+        self.config_id = conf.settings.add_config(self.config)
         self.app = Application(__name__)
         self.memcache = app.build_memcache(self.app)
         IService(self.app).startService()
@@ -46,7 +46,7 @@ class MemcacheTestCase(TestCase):
     @defer.inlineCallbacks
     def tearDown(self):
         yield IService(self.app).stopService()
-        conf.settings.remove_config(self.config)
+        conf.settings.remove_config(self.config_id)
 
     @defer.inlineCallbacks
     def test_set_get(self):
