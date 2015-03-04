@@ -6,11 +6,24 @@ import errno
 import functools
 import itertools
 
+import zope.interface
+
 from twisted.python import log
-from twisted.internet import defer, reactor
+from twisted.internet import defer
 
 
-_DIGITS_RE = re.compile(r"([0-9]+)")
+class TheProxy(object):
+
+    def __init__(self, original):
+        self.__original = original
+        for ifc in zope.interface.providedBy(original):
+            zope.interface.directlyProvides(self, ifc)
+
+    def __getattr__(self, item):
+        return getattr(self.__original, item)
+
+    def __repr__(self):
+        return '<%s wrapping %r>' % (self.__class__.__name__, self.__original)
 
 
 class lazycol(object):
@@ -27,6 +40,9 @@ class lazycol(object):
     def __iter__(self):
         self._iterable, result = itertools.tee(self._iterable)
         return result
+
+
+_DIGITS_RE = re.compile(r"([0-9]+)")
 
 
 def natural_sorted(iterable):
@@ -67,10 +83,6 @@ def ignore_errors(f, logger=None):
         return defer.maybeDeferred(f, *args, **kwargs).addErrback(log.err)
 
     return wrapper
-
-
-def get_attached_clock(obj):
-    return getattr(obj, 'clock', None) or reactor
 
 
 def subdict(d, keys=None):

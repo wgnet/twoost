@@ -85,7 +85,7 @@ class BaseTest(TestCase):
 
     @defer.inlineCallbacks
     def tearDown(self):
-        yield self.client.disconnectAndWait(self.client_connector)
+        yield self.client.disconnectAndWait()
 
     @defer.inlineCallbacks
     def clearQueue(self, queue, sleep_time=0.3):

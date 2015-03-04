@@ -22,7 +22,7 @@ if not msgpack:
 
 import zope.interface
 
-from twisted.internet import defer
+from twisted.internet import defer, reactor
 from twisted.internet.error import ConnectionDone
 from twisted.python import failure, components, reflect
 from twisted.application import service
@@ -34,7 +34,6 @@ from pika.credentials import PlainCredentials as _PlainCredentials
 from pika.exceptions import MethodNotImplemented, ChannelClosed
 
 from twoost import timed
-from twoost._misc import get_attached_clock
 from twoost.pclient import PersistentClientFactory, PersistentClientService
 
 import logging
@@ -207,6 +206,7 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
         TwistedProtocolConnection.__init__(
             self, _ConnectionParameters(**parameters))
 
+        self.clock = reactor
         self.schema = schema
         self.prefetch_count = prefetch_count
         self.always_requeue = always_requeue
@@ -523,10 +523,9 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
                     if m is not None and not m:
                         del self._failed_msg_rej_tasks[consumer_tag]
 
-                clock = get_attached_clock(self)
                 fmrt = self._failed_msg_rej_tasks.setdefault(consumer_tag, {})
                 assert delivery_tag not in fmrt
-                t = clock.callLater(msg_reject_delay, nack_failed_message)
+                t = self.clock.callLater(msg_reject_delay, nack_failed_message)
                 fmrt[delivery_tag] = t, ch
                 logger.debug("fmrt task is %r, dt %r", t, delivery_tag)
             else:

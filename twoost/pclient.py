@@ -3,307 +3,402 @@
 from __future__ import print_function, division
 
 """
-Persisten client.
+Persisten protocol.
 """
 
 import random
 import collections
 import functools
 
-from twisted.internet import protocol, endpoints, defer
+import zope.interface
+
+from twisted.internet import reactor, protocol, endpoints, defer
 from twisted.internet.error import ConnectionClosed
 from twisted.python import failure
 from twisted.application import service
 
-from twoost._misc import get_attached_clock, required_attr
+from twoost._misc import required_attr, TheProxy
 
 import logging
 logger = logging.getLogger(__name__)
 
 
 __all__ = [
+    'IPersistentClientProtocol',
+    'PersistentClientProtocol',
     'PersistentClientFactory',
     'PersistentClientService',
-    'PersistentClientProtocol',
-    'NoAcviteConnection',
+    'NoPersisentClientConnection',
+    'PersistentClientsCollectionService',
 ]
 
 
-# -- client factory
-
-class NoAcviteConnection(Exception):
+class NoPersisentClientConnection(ConnectionClosed):
     pass
 
 
-class _SpiriousReconnectingClientFactory(protocol.ReconnectingClientFactory):
+class IPersistentClientProtocol(zope.interface.Interface):
 
-    disconnectDelay = None  # disabled by default
+    def notifyProtocolReady():
+        pass
 
-    maxDelay = 3600
-    initialDelay = 1.0
-    factor = 1.6180339887498948
-    jitter = 0.11962656472
 
-    # --
+@zope.interface.implementer(IPersistentClientProtocol)
+class PersistentClientProtocol(protocol.Protocol):
+
+    _protocol_ready_notifiers = None
+
+    def notifyProtocolReady(self):
+        if self._protocol_ready_notifiers is None:
+            self._protocol_ready_notifiers = list()
+        d = defer.Deferred()
+        self._protocol_ready_notifiers.append(d)
+        return d
+
+    def protocolReady(self, reason=None):
+        ds = self._protocol_ready_notifiers
+        self._protocol_ready_notifiers = None
+        for d in ds:
+            d.callback(reason if reason is not None else self)
+
+
+class PersistentClientService(service.Service):
+
+    # list of proxied methods (delegate to self.protocol)
+    protocolProxiedMethods = []
+
+    # raised when there is no active connection
+    noClientError = NoPersisentClientConnection
+
+    # various params - (configurable via __init__)
+
+    # reconnect
+    reconnect_initial_delay = 0.5
+    reconnect_max_delay = 1200
+    reconnect_delay_factor = 1.6180339887498948
+    reconnect_delay_jitter = 0.11962656472
+    reconnect_max_retries = None
+
+    # autodisconnect params
+    disconnect_delay = None  # disabled by default
+
+    # retryConnection calls after reconnect
+    callretry_delay = 15
+    callretry_max_count = 500
+
+    # -- state
+    clock = reactor
+    _delayedRetry = None
+    _connectingDeferred = None
+    _protocol = None
+    _protocol_ready = False
+    _protocolStoppingDeferred = None
     _disconnectCallID = None
+    _delayedCalls = None
+    _delayedCallsCnt = 0
 
-    def startedConnecting(self, connector):
-        self.connector = connector
-        protocol.ReconnectingClientFactory.startedConnecting(self, connector)
+    def __init__(self, endpoint, factory, **kwargs):
 
-    def scheduledDisconnect(self):
-        self._cancelDisconnectCall()
-        if self.connector:
-            logger.debug("scheduled disconnect of %s", self)
-            self.connector.disconnect()
+        self.endpoint = endpoint
+        self.factory = factory
 
-    def resetDelay(self):
-        protocol.ReconnectingClientFactory.resetDelay(self)
-        self._cancelDisconnectCall()
-        if self.disconnectDelay:
-            delay = random.normalvariate(self.disconnectDelay, self.jitter)
-            clock = get_attached_clock(self)
-            logger.debug("schedule to disconnect from %s in %s seconds", self, delay)
-            self._disconnectCallID = clock.callLater(
-                max(delay, 0),
-                self.scheduledDisconnect,
+        self._delayedCalls = collections.OrderedDict()
+        self._reconnect_delay = self.reconnect_initial_delay
+        self._reconnect_retries = 0
+
+        for p in [
+                'reconnect_initial_delay',
+                'reconnect_max_delay',
+                'reconnect_delay_factor',
+                'reconnect_delay_jitter',
+                'reconnect_max_retries',
+                'disconnect_delay',
+                'callretry_delay',
+                'callretry_delay',
+        ]:
+            if p in kwargs:
+                setattr(self, p, kwargs[p])
+
+    def startService(self):
+        service.Service.startService(self)
+        self.retryConnection(_reconnect_delay=0.0)
+
+    @defer.inlineCallbacks
+    def stopService(self):
+
+        yield defer.maybeDeferred(service.Service.stopService, self)
+
+        if self._delayedRetry is not None and self._delayedRetry.active():
+            self._delayedRetry.cancel()
+            self._delayedRetry = None
+
+        if self._connectingDeferred is not None:
+            self._connectingDeferred.cancel()
+            try:
+                yield self._connectingDeferred
+            except defer.CancelledError:
+                pass
+            except Exception:
+                logger.exception("cancel connecting")
+            finally:
+                self._connectingDeferred = None
+
+        if self._protocol is not None:
+            self._protocolStoppingDeferred = defer.Deferred()
+            self._protocol.transport.loseConnection()
+            yield self._protocolStoppingDeferred
+
+    # --- delayed calls
+
+    def needToRetryCall(self, f):
+        return f.check(ConnectionClosed)
+
+    def protocolCall(self, method_name, *args, **kwargs):
+        logger.debug("on %s call %s(%r, %r)", self, method_name, args, kwargs)
+
+        if self._protocol and self._protocol_ready:
+            wm = getattr(self._protocol, method_name)
+            logger.debug("on %s call %s(%r, %r)", wm, method_name, args, kwargs)
+            d = defer.maybeDeferred(wm, *args, **kwargs)
+            if self.callretry_delay:
+                def handle_connection_done(e):
+                    if self.needToRetryCall(method_name, e):
+                        return self._protocolCallDelayed(method_name, *args, **kwargs)
+                    else:
+                        return e
+
+                d.addErrback(handle_connection_done)
+            return d
+        else:
+            return self._protocolCallDelayed(method_name, *args, **kwargs)
+
+    def _buildProtocolCallProxy(self, name):
+        return functools.partial(self.protocolCall, name)
+
+    def __getattr__(self, name):
+        if name in self.protocolProxiedMethods:
+            m = self._buildProtocolCallProxy(name)
+            setattr(self, name, m)
+            return m
+        raise AttributeError(name)
+
+    def _protocolCallDelayed(self, method, *args, **kwargs):
+
+        rd = self.callretry_delay
+        if not rd or rd < self._reconnect_delay:
+            return failure.Failure(self.noClientError("no active client"))
+
+        if len(self._delayedCalls) > self.callretry_max_count:
+            return failure.Failure(
+                self.noClientError("no active client - too many delayed calls"))
+
+        delay = self.callretry_delay
+        if self.reconnect_delay_jitter:
+            delay = random.normalvariate(
+                delay,
+                delay * self.reconnect_delay_jitter)
+
+        def on_timeout():
+            _, d = self._delayedCalls.pop(cid, (None, None))
+            if d and not d.called:
+                d.errback(self.noClientError("no active client - timeout"))
+
+        def on_cancel(result):
+            self._delayedCalls.pop(cid, None)
+            if rcall and rcall.active():
+                rcall.cancel()
+            return result
+
+        logger.debug("schedule %s(*%r, **%r)", method, args, kwargs)
+        self._delayedCallsCnt += 1
+        cid = self._delayedCallsCnt
+
+        rcall = self.clock.callLater(delay, on_timeout)
+        d = defer.Deferred().addBoth(on_cancel)
+        self._delayedCalls[cid] = ((method, args, kwargs), d)
+
+        return d
+
+    def _runDelayedCalls(self):
+        logger.debug("run delayed calls on %s", self)
+        assert self._protocol and self._protocol_ready
+        smc = list(self._delayedCalls.values())
+        self._delayedCalls.clear()
+        for (name, args, kwargs), d in smc:
+            logger.debug("call %s(*%r, **%r)", name, args, kwargs)
+            wm = getattr(self._protocol, name)
+            dd = defer.maybeDeferred(wm, *args, **kwargs)
+            dd.chainDeferred(d)
+
+    def _dropDelayedCalls(self):
+        logger.debug("drop delayed calls on %s", self)
+        for _, d in list(self._delayedCalls.itervalues()):
+            d.cancel()
+        self._delayedCalls.clear()
+
+    # --- connection stuff
+
+    def _onClientConnected(self, protocol):
+        self._protocol = protocol
+        if IPersistentClientProtocol.providedBy(protocol):
+            prd = protocol.notifyProtocolReady()
+            prd.addCallback(
+                self._onClientProtocolReady
+            ).addErrback(
+                self._onClientProtocolFailed
             )
+        else:
+            self._onClientProtocolReady(None)
+
+    def _onClientConnectionFailed(self, reason):
+        logger.debug("connection on %s failed: %s", self, reason.getErrorMessage())
+        self._cancelDisconnectCall()
+        self.retryConnection()
+
+    def _onClientConnectionLost(self, reason):
+        logger.debug("connection on %s lost: %s", self, reason.getErrorMessage())
+        self._protocol = None
+        self._cancelDisconnectCall()
+        if self._protocolStoppingDeferred is not None:
+            d = self._protocolStoppingDeferred
+            self._protocolStoppingDeferred = None
+            d.callback(None)
+        self.retryConnection()
+
+    def _onClientProtocolFailed(self, reason):
+        self._protocol_ready = False
+        logger.error("%s protocol failed: %s", self, reason)
+
+    def _onClientProtocolReady(self, result):
+        logger.debug("client protocol ready")
+        self._protocol_ready = True
+        self.resetReconnectDelay()
+        self._runDelayedCalls()
+        self._scheduleDisconnect()
+        return result
+
+    def _clearConnectionAttempt(self, result):
+        self._connectingDeferred = None
+        return result
 
     def _cancelDisconnectCall(self):
         if self._disconnectCallID and self._disconnectCallID.active():
             self._disconnectCallID.cancel()
         self._disconnectCallID = None
 
-    def clientConnectionFailed(self, *args, **kwargs):
+    def _scheduleDisconnect(self):
         self._cancelDisconnectCall()
-        protocol.ReconnectingClientFactory.clientConnectionFailed(self, *args, **kwargs)
-
-    def clientConnectionLost(self, *args, **kwargs):
-        self._cancelDisconnectCall()
-        protocol.ReconnectingClientFactory.clientConnectionLost(self, *args, **kwargs)
-
-    def __getstate__(self):
-        s = protocol.ReconnectingClientFactory.__getstate__(self)
-        s.pop('_disconnectCallID', None)
-        return s
-
-    def stopFactory(self):
-        self._cancelDisconnectCall()
-        return protocol.ReconnectingClientFactory.stopFactory(self)
-
-
-class PersistentClientProtocol(object, protocol.BaseProtocol):
-
-    def connectionMade(self):
-        self.factory.clientReady(self)
-
-
-class PersistentClientFactory(_SpiriousReconnectingClientFactory):
-
-    # list of proxied methods (delegate to self.client)
-    proxiedMethods = []
-
-    # raised when there is no active connection
-    noClientError = NoAcviteConnection
-
-    # retry method calls on disconnect
-    retryDelay = 5  # secs
-    retryOnErrors = [ConnectionClosed]
-    retryMaxCount = 250
-
-    # autoreconnect
-    initialDelay = 0.5
-    maxDelay = 600  # 10 minutes
-    maxRetries = None
-
-    # autodicsonnect
-    disconnectDelay = None
-
-    # -- initial state --
-    client = None
-
-    _notify_disconnect = None
-    _delayed_calls = None
-    _delayed_calls_cnt = 0
-    _incomplete_client = None
-
-    def needToRetryCall(self, name, e):
-        return e.check(*self.retryOnErrors)
-
-    def callClient(self, name, *args, **kwargs):
-
-        if self.client:
-            wm = getattr(self.client, name)
-            d = defer.maybeDeferred(wm, *args, **kwargs)
-            if self.retryDelay:
-                def handle_connection_done(e):
-                    if self.needToRetryCall(name, e):
-                        return self._callClientDelayed(name, *args, **kwargs)
-                    else:
-                        return e
-                d.addErrback(handle_connection_done)
-            return d
-        else:
-            return self._callClientDelayed(name, *args, **kwargs)
-
-    def _buildProxyMethod(self, name):
-        return functools.partial(self.callClient, name)
-
-    def _callClientDelayed(self, method, *args, **kwargs):
-
-        rd = self.retryDelay
-        if not rd or not self.continueTrying or rd < self.delay:
-            return failure.Failure(self.noClientError("no active client"))
-
-        if len(self._delayed_calls) > self.retryMaxCount:
-            return failure.Failure(
-                self.noClientError("no active client - too many delayed calls"))
-
-        logger.debug("schedule %s(*%r, **%r)", method, args, kwargs)
-
-        rcall = None
-        self._delayed_calls_cnt += 1
-        x = self._delayed_calls_cnt
-
-        def on_timeout():
-            _, d = self._delayed_calls.pop(x, (None, None))
-            if d and not d.called:
-                d.errback(self.noClientError("no active client - timeout"))
-
-        def rcall_cancel(x):
-            self._delayed_calls.pop(x, None)
-            if rcall and rcall.active():
-                rcall.cancel()
-            return x
-
-        clock = get_attached_clock(self)
-        d = defer.Deferred().addBoth(rcall_cancel)
-
-        delay = self.retryDelay
-        if self.jitter:
-            delay = random.normalvariate(delay, delay * self.jitter)
-
-        rcall = clock.callLater(delay, on_timeout)
-        self._delayed_calls[x] = ((method, args, kwargs), d)
-
-        return d
-
-    def _runDelayedCalls(self):
-        assert self.client
-        smc = list(self._delayed_calls.values())
-        self._delayed_calls.clear()
-        for (name, args, kwargs), d in smc:
-            logger.debug("call %s(*%r, **%r)", name, args, kwargs)
-            wm = getattr(self.client, name)
-            dd = defer.maybeDeferred(wm, *args, **kwargs)
-            dd.chainDeferred(d)
-
-    def _cancelAllDelayedCalls(self):
-        for _, d in list(self._delayed_calls.itervalues()):
-            d.cancel()
-
-    def __getattr__(self, name):
-        if name in self.proxiedMethods:
-            m = self._buildProxyMethod(name)
-            setattr(self, name, m)
-            return m
-        raise AttributeError(name)
-
-    def startFactory(self):
-        if not self._delayed_calls:
-            self._delayed_calls = collections.OrderedDict()
-        _SpiriousReconnectingClientFactory.startFactory(self)
-        logger.debug("start %s", self)
-
-    def stopFactory(self):
-        logger.debug("stop %s", self)
-        self._cancelAllDelayedCalls()
-        _SpiriousReconnectingClientFactory.stopFactory(self)
+        if self.disconnect_delay:
+            _reconnect_delay = random.normalvariate(
+                self.disconnect_delay, self.reconnect_delay_jitter)
+            logger.debug("schedule to disconnect from %s in %s seconds", self, _reconnect_delay)
+            self._disconnectCallID = self.clock.callLater(
+                max(_reconnect_delay, 0),
+                self.dropConnection)
 
     @defer.inlineCallbacks
-    def disconnectAndWait(self, connector):
-        """For test purposes only. Don't use this method!"""
-        self.stopTrying()
-        if self._incomplete_client:
-            yield defer.maybeDeferred(self._incomplete_client.transport.loseConnection)
-        if not self.client:
+    def dropConnection(self):
+        self._cancelDisconnectCall()
+        if self._protocol is not None:
+            logger.debug("lose connection on %r", self._protocol)
+            self._protocolStoppingDeferred = defer.Deferred()
+            self._protocol.transport.loseConnection()
+            yield self._protocolStoppingDeferred
+
+    def retryConnection(self, _reconnect_delay=None):
+        """ Have this connector connect again, after a suitable _reconnect_delay."""
+
+        if not self.running:
+            logger.debug("Service stopped, skip connection on %s", self.endpoint)
             return
-        self._notify_disconnect = defer.Deferred()
-        yield self._notify_disconnect
+
+        if self.reconnect_max_retries and (self._reconnect_retries >= self.reconnect_max_retries):
+            logger.info(
+                "Abandoning %s after %d _reconnect_retries.",
+                self.endpoint, self._reconnect_retries)
+            return
+
+        if self._connectingDeferred is not None:
+            logger.debug("Abandoning connection for %s because another attempt.", self.endpoint)
+            return
+
+        if _reconnect_delay is None:
+            self._reconnect_delay = min(
+                self._reconnect_delay * self.reconnect_delay_factor,
+                self.reconnect_max_delay)
+            if self.reconnect_delay_jitter:
+                self._reconnect_delay = random.normalvariate(
+                    self._reconnect_delay,
+                    self._reconnect_delay * self.reconnect_delay_jitter)
+            _reconnect_delay = self._reconnect_delay
+
+        logger.debug("Will retryConnection %s in %s seconds.", self.endpoint, _reconnect_delay)
+
+        def reconnector():
+            self._reconnect_retries += 1
+            self._connectingDeferred = self.endpoint.connect(
+                _PClientProtocolFactoryProxy(self.factory, self)
+            ). addBoth(
+                self._clearConnectionAttempt
+            ).addCallback(
+                self._onClientConnected
+            ).addErrback(
+                self._onClientConnectionFailed
+            )
+
+        self._delayedRetry = self.clock.callLater(_reconnect_delay, reconnector)
+
+    def resetReconnectDelay(self):
+        """
+        Call this method after a successful connection: it resets the _reconnect_delay and
+        the retryConnection counter.
+        """
+        self._reconnect_delay = self.reconnect_initial_delay
+        self._reconnect_retries = 0
+
+
+class PClientProtocolProxy(TheProxy):
+    """A proxy for a Protocol to provide connectionLost notification."""
+
+    def __init__(self, protocol, clientService):
+        TheProxy.__init__(self, protocol)
+        self.__protocol = protocol
+        self.__clientService = clientService
+
+    def connectionLost(self, reason):
+        result = self.__protocol.connectionLost(reason)
+        self.__clientService._onClientConnectionLost(reason)
+        return result
+
+
+class _PClientProtocolFactoryProxy(TheProxy):
+    """A wrapper for a ProtocolFactory to facilitate restarting Protocols."""
+
+    _protocolProxyFactory = PClientProtocolProxy
+
+    def __init__(self, protocolFactory, clientService):
+        TheProxy.__init__(self, protocolFactory)
+        self.protocolFactory = protocolFactory
+        self.clientService = clientService
 
     def buildProtocol(self, addr):
-        logger.debug("build protocol %s", self.protocol)
-        p = self.protocol()
-        p.factory = self
-        assert isinstance(p, protocol.BaseProtocol)
-        self._incomplete_client = p
-        return p
-
-    def clientConnectionLost(self, connector, reason):
-        logger.debug("connection lost: %s", reason)
-        self.client = None
-        _SpiriousReconnectingClientFactory.clientConnectionLost(self, connector, reason)
-
-        if self._notify_disconnect:
-            self._notify_disconnect.callback(None)
-            self._notify_disconnect = None
-
-    def clientReady(self, client):
-
-        """Client MUST call this method when all init-conn stuff wad done."""
-
-        logger.debug("client %s now is ready", client)
-        self.client = client
-        self.resetDelay()
-        self._runDelayedCalls()
-
-    def __getstate__(self):
-        s = _SpiriousReconnectingClientFactory.__getstate__(self)
-        s.pop('client', None)
-        s.pop('_notify_disconnect', None)
-        s.pop('_delayed_calls', None)
-        s.pop('_delayed_calls_cnt', None)
-        return s
+        protocol = self.protocolFactory.buildProtocol(addr)
+        wrappedProtocol = self._protocolProxyFactory(protocol, self.clientService)
+        return wrappedProtocol
 
 
-# --- integration with app-framework
+class PersistentClientFactory(protocol.Factory):
+
+    def __init__(self, *args, **kwargs):
+        pass
 
 
-class ClientFactoryWithEndpointService(service.Service):
-
-    def __init__(self, factory, endpoint):
-        self.factory = factory
-        self.endpoint = endpoint
-        self._connd = None
-
-    def startService(self):
-        service.Service.startService(self)
-        self.endpoint.connect(self.factory)
-
-    @defer.inlineCallbacks
-    def stopService(self):
-        try:
-            self.factory.stopTrying()
-        except Exception:
-            logger.warning("unable to stopTrying", exc_info=1)
-
-        c = self.factory._incomplete_client
-        t = getattr(c, 'protocol', None)
-        if c is not None and t is not None:
-            logger.debug("lose connection on %r", t)
-            yield defer.maybeDeferred(t.loseConnection)
-        else:
-            logger.debug("no active transport for %r", self.factory)
-
-        yield service.Service.stopService(self)
-
-
-class PersistentClientService(service.MultiService):
-
-    defaultPort = None
-    defaultHost = 'localhost'
+class PersistentClientsCollectionService(service.MultiService):
 
     factory = required_attr
+    clientService = PersistentClientService
+    protocolProxiedMethods = []
+    defaultParams = {}
 
     def __init__(self, connections):
         service.MultiService.__init__(self)
@@ -313,30 +408,34 @@ class PersistentClientService(service.MultiService):
 
     def buildClientEndpoint(self, params):
         if not params.get('endpoint'):
-            ep = "tcp:host=%s:port=%s" % (
-                params.get('host', self.defaultHost),
-                params.get('port', self.defaultPort),
-            )
+            ep = "tcp:host=%s:port=%s" % (params['host'], params['port'])
         else:
             assert not params.get('host')
             assert not params.get('port')
             ep = params['endpoint']
-        return endpoints.clientFromString(ep)
+        return endpoints.clientFromString(reactor, ep)
 
     def buildClientFactory(self, params):
-        params = dict(params)
-        params.pop('endpoint', None)
-        params.pop('host', None)
-        params.pop('port', None)
-        return self.factory(**params)
+        # ignore `params`
+        return self.factory()
+
+    def buildClientService(self, endpoint, factory, params):
+        s = self.clientService(endpoint, factory, **params)
+        s.protocolProxiedMethods = self.protocolProxiedMethods
+        return s
 
     def _initClientService(self, connection, params):
-        logger.debug("init client service %r, params %r", connection, params)
-        factory = self.buildClientFactory(params)
-        endpoint = self.buildClientEndpoint(params)
-        s = ClientFactoryWithEndpointService(factory, endpoint)
-        s.setName(connection)
-        self.addService(s)
+
+        p = dict(self.defaultParams)
+        p.update(params)
+        logger.debug("create protocol service %r, params %r", connection, p)
+
+        factory = self.buildClientFactory(p)
+        endpoint = self.buildClientEndpoint(p)
+        service = self.buildClientService(endpoint, factory, p)
+
+        service.setName(connection)
+        self.addService(service)
 
     def __getitem__(self, name):
-        return self.getServiceNamed(name).factory
+        return self.getServiceNamed(name)

@@ -7,7 +7,7 @@ from twisted.internet import defer
 from twisted.protocols.memcache import MemCacheProtocol
 
 from .pclient import (
-    PersistentClientService,
+    PersistentClientsCollectionService,
     PersistentClientFactory,
     PersistentClientProtocol,
 )
@@ -28,33 +28,8 @@ class _MemCacheProtocol(PersistentClientProtocol, MemCacheProtocol):
         self.setTimeout(None)
         return MemCacheProtocol.connectionLost(self, reason)
 
-
-class MemCacheFactory(PersistentClientFactory):
-
-    protocol = _MemCacheProtocol
-    retryDelay = None  # disable
-    maxDelay = 180  # 3 minutes
-    initialDelay = 0.1
-
-    proxiedMethods = [
-        'increment',
-        'decrement',
-        'replace',
-        'add',
-        'set',
-        'checkAndSet',
-        'append',
-        'prepend',
-        'get',
-        'getMultiple',
-        'stats',
-        'version',
-        'delete',
-        'flushAll',
-    ]
-
-    # MemCacheProtocol uses RE to indicate disconnection
-    noClientError = RuntimeError
+    def connectionMade(self):
+        self.protocolReady()
 
 
 # ---
@@ -140,11 +115,39 @@ class _MemCacheMultiClientProxy(object):
         raise NotImplementedError
 
 
-class MemCacheService(PersistentClientService):
+class MemCacheFactory(PersistentClientFactory):
+    protocol = MemCacheProtocol
+
+
+class MemCacheService(PersistentClientsCollectionService):
 
     name = 'memcaches'
     factory = MemCacheFactory
-    defaultPort = 11211
+
+    protocolProxiedMethods = [
+        'increment',
+        'decrement',
+        'replace',
+        'add',
+        'set',
+        'checkAndSet',
+        'append',
+        'prepend',
+        'get',
+        'getMultiple',
+        'stats',
+        'version',
+        'delete',
+        'flushAll',
+    ]
+
+    defaultParams = {
+        'host': "localhost",
+        'port': 11211,
+        'reconnect_max_delay': 180,
+        'reconnect_initial_delay': 0.1,
+        'callretry_delay': 0,
+    }
 
     def multiClient(self, resolveClientNameByKey):
         return _MemCacheMultiClientProxy(self, resolveClientNameByKey)

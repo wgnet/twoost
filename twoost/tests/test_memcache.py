@@ -10,7 +10,7 @@ from twisted.internet import defer, error
 from twisted.application.service import Application, IService
 from twisted.trial.unittest import TestCase
 
-from twoost import app, conf, timed
+from twoost import app, conf, timed, pclient
 
 
 def gr(n):
@@ -69,13 +69,14 @@ class MemcacheTestCase(TestCase):
     @defer.inlineCallbacks
     def test_reconnect(self):
         key, val = gr(2)
+
         c = self.memcache['c1']
         yield c.set(key, val)
 
-        c.scheduledDisconnect()
+        yield c.dropConnection()
         try:
             yield c.get(key, val)
-        except error.ConnectionClosed:
+        except pclient.NoPersisentClientConnection:
             pass
         else:
             self.fail("expected ConnectionClosed")
@@ -94,7 +95,9 @@ class MemcacheTestCase(TestCase):
             yield m.set(key, str(i))
             expected_vs[key] = 0, str(i)
 
-        self.memcache['c1'].scheduledDisconnect()
+        yield self.memcache['c1'].dropConnection()
+
+        yield timed.sleep(0.1)
 
         try:
             yield m.getMultiple(keys, ignoreErrors=False)
@@ -105,9 +108,9 @@ class MemcacheTestCase(TestCase):
 
         vs0 = yield m.getMultiple(keys)
         yield timed.sleep(0.3)
+
         self.assertTrue(all(
             isinstance(e.value, error.ConnectionClosed)
-            or (isinstance(e.value, RuntimeError) and "not connected" == str(e.value))
             for e in self.flushLoggedErrors()
         ))
 
