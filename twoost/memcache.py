@@ -9,7 +9,7 @@ from twisted.protocols.memcache import MemCacheProtocol
 from .pclient import (
     PersistentClientService,
     PersistentClientFactory,
-    PersistentClientProtocolMixin,
+    PersistentClientProtocol,
 )
 from twoost._misc import merge_dicts
 
@@ -18,7 +18,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class _MemCacheProtocol(PersistentClientProtocolMixin, MemCacheProtocol):
+class _MemCacheProtocol(PersistentClientProtocol, MemCacheProtocol):
 
     def __init__(self, timeout=3, max_key_length=250):
         MemCacheProtocol.__init__(self, timeOut=timeout)

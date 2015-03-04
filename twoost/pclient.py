@@ -10,12 +10,10 @@ import random
 import collections
 import functools
 
-from twisted.internet import defer
+from twisted.internet import protocol, endpoints, defer
 from twisted.internet.error import ConnectionClosed
 from twisted.python import failure
-from twisted.internet import protocol
 from twisted.application import service
-from twisted.application.internet import TCPClient, StreamServerEndpointService
 
 from twoost._misc import get_attached_clock, required_attr
 
@@ -26,7 +24,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     'PersistentClientFactory',
     'PersistentClientService',
-    'PersistentClientProtocolMixin',
+    'PersistentClientProtocol',
     'NoAcviteConnection',
 ]
 
@@ -94,7 +92,7 @@ class _SpiriousReconnectingClientFactory(protocol.ReconnectingClientFactory):
         return protocol.ReconnectingClientFactory.stopFactory(self)
 
 
-class PersistentClientProtocolMixin(object):
+class PersistentClientProtocol(object, protocol.BaseProtocol):
 
     def connectionMade(self):
         self.factory.clientReady(self)
@@ -123,9 +121,11 @@ class PersistentClientFactory(_SpiriousReconnectingClientFactory):
 
     # -- initial state --
     client = None
+
     _notify_disconnect = None
     _delayed_calls = None
     _delayed_calls_cnt = 0
+    _incomplete_client = None
 
     def needToRetryCall(self, name, e):
         return e.check(*self.retryOnErrors)
@@ -223,10 +223,9 @@ class PersistentClientFactory(_SpiriousReconnectingClientFactory):
     @defer.inlineCallbacks
     def disconnectAndWait(self, connector):
         """For test purposes only. Don't use this method!"""
-
         self.stopTrying()
-        yield connector.disconnect()
-
+        if self._incomplete_client:
+            yield defer.maybeDeferred(self._incomplete_client.transport.loseConnection)
         if not self.client:
             return
         self._notify_disconnect = defer.Deferred()
@@ -236,6 +235,8 @@ class PersistentClientFactory(_SpiriousReconnectingClientFactory):
         logger.debug("build protocol %s", self.protocol)
         p = self.protocol()
         p.factory = self
+        assert isinstance(p, protocol.BaseProtocol)
+        self._incomplete_client = p
         return p
 
     def clientConnectionLost(self, connector, reason):
@@ -268,26 +269,40 @@ class PersistentClientFactory(_SpiriousReconnectingClientFactory):
 # --- integration with app-framework
 
 
-class ClientFactoryWithService(service.Service):
+class ClientFactoryWithEndpointService(service.Service):
 
-    def __init__(self, client, connector):
-        self.client = client
-        self.connector = connector
+    def __init__(self, factory, endpoint):
+        self.factory = factory
+        self.endpoint = endpoint
+        self._connd = None
 
     def startService(self):
         service.Service.startService(self)
-        self.connector.startService()
+        self.endpoint.connect(self.factory)
 
+    @defer.inlineCallbacks
     def stopService(self):
-        self.client.stopTrying()
-        service.Service.stopService(self)
-        return self.connector.stopService()
+        try:
+            self.factory.stopTrying()
+        except Exception:
+            logger.warning("unable to stopTrying", exc_info=1)
+
+        c = self.factory._incomplete_client
+        t = getattr(c, 'protocol', None)
+        if c is not None and t is not None:
+            logger.debug("lose connection on %r", t)
+            yield defer.maybeDeferred(t.loseConnection)
+        else:
+            logger.debug("no active transport for %r", self.factory)
+
+        yield service.Service.stopService(self)
 
 
 class PersistentClientService(service.MultiService):
 
     defaultPort = None
     defaultHost = 'localhost'
+
     factory = required_attr
 
     def __init__(self, connections):
@@ -296,18 +311,17 @@ class PersistentClientService(service.MultiService):
         for connection, cparams in self.connections.items():
             self._initClientService(connection, cparams)
 
-    def buildClientService(self, clientFactory, params):
-        if 'endpoint' in params:
-            assert 'host' not in params
-            assert 'port' not in params
-            endpoint = params['endpoint']
-            # XXX
-            return StreamServerEndpointService(endpoint, clientFactory)
+    def buildClientEndpoint(self, params):
+        if not params.get('endpoint'):
+            ep = "tcp:host=%s:port=%s" % (
+                params.get('host', self.defaultHost),
+                params.get('port', self.defaultPort),
+            )
         else:
-            assert 'endpoint' not in params
-            host = params.get('host', self.defaultHost)
-            port = params.get('port', self.defaultPort)
-            return TCPClient(host, port, clientFactory)
+            assert not params.get('host')
+            assert not params.get('port')
+            ep = params['endpoint']
+        return endpoints.clientFromString(ep)
 
     def buildClientFactory(self, params):
         params = dict(params)
@@ -318,13 +332,11 @@ class PersistentClientService(service.MultiService):
 
     def _initClientService(self, connection, params):
         logger.debug("init client service %r, params %r", connection, params)
-
-        client = self.buildClientFactory(params)
-        service = self.buildClientService(client, params)
-
-        s = ClientFactoryWithService(client, service)
+        factory = self.buildClientFactory(params)
+        endpoint = self.buildClientEndpoint(params)
+        s = ClientFactoryWithEndpointService(factory, endpoint)
         s.setName(connection)
         self.addService(s)
 
     def __getitem__(self, name):
-        return self.getServiceNamed(name).client
+        return self.getServiceNamed(name).factory
