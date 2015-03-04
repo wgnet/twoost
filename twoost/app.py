@@ -51,10 +51,22 @@ def react_app(app, main, argv=()):
     return task.react(appless_main)
 
 
-def build_timer(app, step, callback, stop_on_error=False):
+def build_timer(app, when, callback, stop_on_error=False):
+    from twoost import cron
+
     if not stop_on_error:
         callback = ignore_errors(callback)
-    return attach_service(app, internet.TimerService(step, callback))
+
+    try:
+        interval = float(when)
+    except ValueError:
+        interval = None
+
+    logger.debug("build timer %r, callback %r", when, callback)
+    if interval is not None:
+        return attach_service(app, cron.IntervalTimerService(interval, callback))
+    else:
+        return attach_service(app, cron.CrontabTimerService(when, callback))
 
 
 # -- generic server & client

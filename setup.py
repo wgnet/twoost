@@ -33,5 +33,6 @@ setup(
         'argparse>=1.2',
         'msgpack-python>=0.4',
         'raven>=4.0',
+        'crontab>=0.20',
     ],
 )
