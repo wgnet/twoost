@@ -136,7 +136,7 @@ class RPCProxyService(service.MultiService):
             logger.info("connect to %r, params %r", client_name, params)
             client = make_rpc_proxy(params)
             client.setName(client_name)
-            self.addService(client)
+            client.setServiceParent(self)
 
     def makeCaller(self, connection, method):
         def call(*args):

@@ -4,7 +4,7 @@ from __future__ import print_function, division, absolute_import
 
 import zope.interface
 
-from twisted.internet import reactor
+from twisted.internet import reactor, endpoints
 from twisted.internet import defer
 from twisted.trial.unittest import TestCase
 
@@ -74,23 +74,36 @@ class BaseTest(TestCase):
     schema = None
 
     def clientParams(self):
-        return dict(schema=self.schema)
+        return {
+            'schema': self.schema,
+            'host': "localhost",
+            'port': 5672,
+        }
 
     @defer.inlineCallbacks
     def setUp(self):
-        defer.setDebugging(True)
-        self.client = amqp.AMQPClient(**self.clientParams())
-        self.client_connector = reactor.connectTCP("localhost", 5672, self.client)
-        yield self.client.notifyHandshaking()
+        params = self.clientParams()
+
+        self.endpoint = endpoints.TCP4ClientEndpoint(reactor, "localhost", 5672)
+        self.factory = amqp.AMQPFactory(**params)
+        self.client = amqp.AMQPService(self.endpoint, self.factory, **params)
+        self.client.startService()
+
+        yield sleep(1)
+
+        # yield self.client.notifyHandshaking()
 
     @defer.inlineCallbacks
     def tearDown(self):
-        yield self.client.disconnectAndWait()
+        yield self.client.stopService()
 
     @defer.inlineCallbacks
     def clearQueue(self, queue, sleep_time=0.3):
-        sql = amqp.QueueConsumer(self.client, queue, lambda _: None)
-        yield sql.startService()
+
+        def dropmsg(m):
+            logger.info("DROP MSG %r", m)
+
+        sql = self.client.setupQueueConsuming(queue, dropmsg)
         yield sleep(sleep_time)
         yield sql.stopService()
 
@@ -99,12 +112,13 @@ class ReconnectTest(BaseTest):
 
     schema = SingleQueueSchema(QX, auto_delete=False)
 
+    @defer.inlineCallbacks
     def rcv(self, x):
         logger.debug("RCV %r", x)
         self.messages_cnt += 1
         if self.publish:
             logger.debug("RESEND %r", x)
-            self.client.publishMessage(
+            yield self.client.publishMessage(
                 exchange='',
                 routing_key=QX,
                 body=str(int(x) + 1),
@@ -119,7 +133,7 @@ class ReconnectTest(BaseTest):
         yield self.clearQueue(QX)
         self.messages_cnt = 0
         self.publish = True
-        self.client.maxDelay = 0.01
+        self.client.reconnect_max_delay = 0.01
 
     @defer.inlineCallbacks
     def clearTestingQueue(self):
@@ -142,18 +156,18 @@ class ReconnectTest(BaseTest):
 
     @defer.inlineCallbacks
     def pushToken(self):
-        yield self.client.publishMessage(exchange='', routing_key=QX, body='0', confirm=True)
+        yield self.client.publishMessage(
+            exchange='', routing_key=QX, body='0', confirm=True)
 
     @defer.inlineCallbacks
     def test_reconnection(self):
 
-        sql = amqp.QueueConsumer(self.client, QX, self.rcv)
-        yield sql.startService()
+        sql = self.client.setupQueueConsuming(QX, self.rcv)
         yield self.clearQueue(QX)
         yield self.pushToken()
 
         for i in range(5):
-            yield self.client_connector.disconnect()
+            yield self.client.dropConnection()
             yield sleep(i / 10)
 
         cnt = yield self.consumeToken()
@@ -163,30 +177,32 @@ class ReconnectTest(BaseTest):
     @defer.inlineCallbacks
     def test_auto_disconnection(self):
 
-        self.client.maxDelay = 0.01
-        self.client.disconnectDelay = 0.3
-        self.client.resetDelay()
+        self.client.disconnect_delay = 0.5
+        self.client.resetReconnectDelay()
 
         self.disconnections = 0
 
-        def scheduledDisconnect():
+        def dropConnection():
             self.disconnections += 1
-            old_scheduledDisconnect()
+            old_dropConnection()
 
-        old_scheduledDisconnect = self.client.scheduledDisconnect
-        self.client.scheduledDisconnect = scheduledDisconnect
+        old_dropConnection = self.client.dropConnection
+        self.client.dropConnection = dropConnection
 
-        sql = amqp.QueueConsumer(self.client, QX, self.rcv)
-        yield sql.startService()
+        sql = self.client.setupQueueConsuming(QX, self.rcv)
+
         yield self.pushToken()
-        yield sleep(4)  # expect autodisconnects here
+        yield sleep(5)  # expect autodisconnects here
 
         # disable disconnects - we want to consume initial token
-        self.client.scheduledDisconnect = lambda: None
+        self.client.disconnect_delay = None
+        self.client.resetReconnectDelay()
+
+        yield sleep(1)
 
         cnt = yield self.consumeToken(sleep_time=2)
 
-        self.assertTrue(self.disconnections > 1, "auto disconnections was made")
+        self.assertTrue(self.disconnections > 2, "auto disconnects was made")
         self.assertTrue(cnt > 0, "initial message was lost")
 
         yield sql.stopService()
@@ -195,21 +211,19 @@ class ReconnectTest(BaseTest):
     def test_invalid_handler(self):
 
         self.client.maxDelay = 0.01
-        yield self.client_connector.disconnect()
+        yield self.client.dropConnection()
 
         def rcv(x):
             self.messages_cnt += 1
             if self.publish:
                 raise Exception("some error here")
 
-        sql = amqp.QueueConsumer(
-            self.client, QX, rcv,
+        sql = self.client.setupQueueConsuming(
+            QX, rcv,
             requeue_delay=0.2,
             always_requeue=True,
         )
         yield sleep(0.1)
-
-        yield sql.startService()
 
         self.publish = True
         yield self.client.publishMessage(exchange='', routing_key=QX, body="***")
@@ -220,11 +234,11 @@ class ReconnectTest(BaseTest):
         yield sleep(1.0)
         self.assertEqual(2, self.messages_cnt, "just 1 redelivery")
 
-        self.client_connector.disconnect()
+        yield self.client.dropConnection()
         yield sleep(1.0)
         self.assertEqual(3, self.messages_cnt, "more after disconnect")
 
-        yield self.client_connector.disconnect()
+        yield self.client.dropConnection()
         self.publish = False
         yield self.consumeToken()
         yield sql.stopService()
@@ -252,14 +266,13 @@ class ReconnectTest(BaseTest):
                     confirm=True,  # !!
                 ).addBoth(lambda _: None)  # ignore result/errors
 
-        sql = amqp.QueueConsumer(self.client, QX, rcv_unsafe)
-        yield sql.startService()
+        sql = self.client.setupQueueConsuming(QX, rcv_unsafe)
         yield self.clearQueue(QX)
 
         yield self.client.publishMessage(exchange='', routing_key=QX, body='0')
 
         for i in range(5):
-            yield self.client_connector.disconnect()
+            yield self.client.dropConnection()
             yield sleep(i / 10)
 
         cnt = yield self.consumeToken()
@@ -280,8 +293,7 @@ class QueueConsumerTest(BaseTest):
     def test_several_messages_without_serialization(self):
         yield self.client.publishMessage(exchange='', routing_key=Q1, body="tm1")
         result = []
-        sql = amqp.QueueConsumer(self.client, Q1, result.append)
-        yield sql.startService()
+        sql = self.client.setupQueueConsuming(Q1, result.append)
         yield self.client.publishMessage(exchange='', routing_key=Q1, body="tm2")
         yield self.client.publishMessage(exchange='', routing_key=Q1, body="tm3")
         yield sleep(0.1)
@@ -291,21 +303,19 @@ class QueueConsumerTest(BaseTest):
         self.assertEqual(result, ["tm1", "tm2", "tm3"])
         del result[:]
         yield sql.startService()
-        yield sleep(0.1)
+        yield sleep(0.2)
         self.assertEqual(result, ["tm_after"])
 
     @defer.inlineCallbacks
     def send_and_receive_one_message(self, content_type, message_body):
 
+        yield self.clearQueue(Q1)
         result_d = defer.Deferred()
 
         def on_msg(m):
             result_d.callback(m)
-            return sql.stopService()
 
-        sql = amqp.QueueConsumer(self.client, Q1, on_msg)
-
-        yield sql.startService()
+        sql = self.client.setupQueueConsuming(Q1, on_msg, no_ack=1)
 
         yield self.client.publishMessage(
             exchange='', routing_key=Q1,
@@ -351,12 +361,9 @@ class QueueConsumerTest(BaseTest):
 
         result_d = defer.Deferred()
 
-        def on_msg(m):
-            result_d.callback(m)
-            return sql.stopService()
+        sql = self.client.setupQueueConsuming(
+            Q1, result_d.callback, deserialize=False, no_ack=1)
 
-        sql = amqp.QueueConsumer(self.client, Q1, on_msg, deserialize=False)
-        yield sql.startService()
         yield self.client.publishMessage(
             exchange='', routing_key=Q1,
             body="BODY", content_type='plain/text')
@@ -369,6 +376,8 @@ class QueueConsumerTest(BaseTest):
         self.assertEqual(Q1, msg.routing_key)
         self.assertEqual('', msg.exchange)
 
+        yield sql.stopService()
+
     @defer.inlineCallbacks
     def test_parallel_consumers(self):
 
@@ -379,21 +388,24 @@ class QueueConsumerTest(BaseTest):
             return sleep(0.2)
 
         # process in 10 "threads"
-        sql = amqp.QueueConsumer(self.client, Q1, on_msg, parallel=10)
+        sql = self.client.setupQueueConsuming(Q1, on_msg, parallel=1)
+        yield sql.stopService()
 
-        for i in range(50):
-            yield self.client.publishMessage(
-                exchange='', routing_key=Q1,
+        self.assertEqual([], results)
+
+        for i in range(5):
+            self.client.publishMessage(
+                exchange='', routing_key=Q1, confirm=0,
                 body=str(i), content_type='plain/text')
 
-        yield sql.startService()
         # each message takes 0.2s, 10 threads give us 20 processed messages
+        yield sql.startService()
         yield sleep(0.3)
-        self.assertEqual(20, len(results), "should recieve exact 20 messages")
-        del results[:]
+        self.assertEqual(2, len(results), "should recieve exact 20 messages")
 
         yield sql.stopService()
-        yield sleep(1)
+        del results[:]
+        yield sleep(0.5)
         self.assertEqual(0, len(results), "no more messages (consuming cancelled)")
 
     @defer.inlineCallbacks
@@ -406,8 +418,7 @@ class QueueConsumerTest(BaseTest):
             return self.client.publishMessage(
                 exchange='', routing_key=Q1, body=str(int(x) + 1))
 
-        sql = amqp.QueueConsumer(self.client, Q1, rcv, no_ack=True, parallel=10)
-        yield sql.startService()
+        sql = self.client.setupQueueConsuming(Q1, rcv, no_ack=True, parallel=10)
         for i in range(10):
             yield self.client.publishMessage(exchange='', routing_key=Q1, body="0")
 
@@ -421,10 +432,11 @@ class QueueConsumerTest(BaseTest):
 
     @defer.inlineCallbacks
     def test_quick_consume_and_cancel(self):
-        sql = amqp.QueueConsumer(self.client, Q1, lambda _: None)
+        sql = self.client.setupQueueConsuming(Q1, lambda _: None)
+        yield sql.stopService()
         for _ in range(20):
-            yield sql.startService()
-            yield sql.stopService()
+            yield defer.maybeDeferred(sql.startService)
+            yield defer.maybeDeferred(sql.stopService)
 
 
 class ExchangeConsumerTest(BaseTest):
@@ -435,9 +447,7 @@ class ExchangeConsumerTest(BaseTest):
     def test_send_to_exchange(self):
 
         result = []
-        sels = [amqp.ExchangeConsumer(self.client, E1, result.append) for _ in range(5)]
-        for sel in sels:
-            yield sel.startService()
+        sels = [self.client.setupExchangeConsuming(E1, result.append) for _ in range(5)]
 
         yield sleep(0.2)
         yield self.client.publishMessage(exchange=E1, routing_key=Q1, body="tm1")
@@ -447,8 +457,9 @@ class ExchangeConsumerTest(BaseTest):
         for sel in sels:
             yield sel.stopService()
 
-        yield self.client.publishMessage(exchange=E1, routing_key=Q1, body="tm_after")
         yield sleep(0.2)
+        yield self.client.publishMessage(exchange=E1, routing_key=Q1, body="tm_after")
+        yield sleep(1)
 
         self.assertEqual(
             sorted(["tm1", "tm2"] * len(sels)),
@@ -458,6 +469,7 @@ class ExchangeConsumerTest(BaseTest):
 
         for sel in sels:
             yield sel.startService()
+
         yield sleep(0.2)
         self.assertEqual([], result)
 

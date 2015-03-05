@@ -129,7 +129,7 @@ def build_amqps(app, active_connections=None):
         if conn in schemas:
             d[conn]['schema'] = schemas[conn]
 
-    return attach_service(app, amqp.AMQPService(d))
+    return attach_service(app, amqp.AMQPCollectionService(d))
 
 
 def build_web(app, site, prefix=None, endpoint=None):

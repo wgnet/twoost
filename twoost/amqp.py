@@ -7,6 +7,7 @@ Simple Twisted-style abstraction around AMQP pika library.
 """
 
 import json
+import uuid
 import functools
 
 try:
@@ -33,8 +34,8 @@ from pika.connection import ConnectionParameters as _ConnectionParameters
 from pika.credentials import PlainCredentials as _PlainCredentials
 from pika.exceptions import MethodNotImplemented, ChannelClosed
 
-from twoost import timed
-from twoost.pclient import PersistentClientFactory, PersistentClientService
+from twoost import timed, pclient
+
 
 import logging
 logger = logging.getLogger(__name__)
@@ -190,16 +191,19 @@ class _SchemaBuilderProxy(components.proxyForInterface(IAMQPSchemaBuilder)):
     pass
 
 
-class _AMQPProtocol(TwistedProtocolConnection, object):
+class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol):
 
     delayed_rejections_limit = 10000
+    __consumer_tag_cnt = 0
 
     def __init__(
-            self, parameters,
+            self,
+            parameters,
             schema=None,
             prefetch_count=None,
             always_requeue=False,
             requeue_delay=None,
+            **kwargs
     ):
 
         logger.debug("construct new _AMQPProtocol (id = %r)...", id(self))
@@ -212,10 +216,7 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
         self.always_requeue = always_requeue
         self.requeue_delay = requeue_delay
 
-        self._on_handshaking_made = defer.Deferred()
-
         self._published_messages = {}
-        self._exclusive_queues = {}
         self._consume_state = {}
 
         # FIXME: replace with `ttl`
@@ -226,14 +227,13 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
     def connectionMade(self):
         logger.debug("amqp connection was made")
         TwistedProtocolConnection.connectionMade(self)
-        self.factory.resetDelay()
         self.ready.addCallback(lambda _: self.handshakingMade())
         self.ready.addErrback(self.handshakingFailed)
 
-    def handshakingFailed(self, failure):
-        logger.error("handshaking failed - disconnect due to %s", failure)
+    def handshakingFailed(self, f):
+        logger.error("handshaking failed - disconnect due to %s", f)
         self.transport.loseConnection()
-        self._on_handshaking_made.errback(failure)
+        self.protocolFailed(failure)
 
     @defer.inlineCallbacks
     def _open_write_channel(self):
@@ -256,7 +256,6 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
 
     @defer.inlineCallbacks
     def handshakingMade(self):
-
         logger.info("handshaking with server was made")
 
         yield self._open_write_channel()
@@ -270,7 +269,7 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
             logger.info("amqp schema has been declared")
 
         self.ready_for_publish = True
-        self._on_handshaking_made.callback(True)
+        self.protocolReady()
 
     def _on_consuming_channel_closed(self, ct, channel, reply_code, reply_text):
         logger.error(
@@ -283,7 +282,7 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
         self.consumeQueue(
             queue=s['queue'],
             callback=s['callback'],
-            no_ack=s['callback'],
+            no_ack=s['no_ack'],
             consumer_tag=ct,
             parallel=s['parallel'],
             **s.get('kwargs', {})
@@ -329,7 +328,10 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
         logger.debug("connection lost due to %r", reason)
         self.ready_for_publish = None
 
-        for ct, cstate in self._consume_state.items():
+        cstates = list(self._consume_state.items())
+        self._consume_state.clear()
+
+        for ct, cstate in cstates:
             queue_obj = cstate['queue_obj']
             no_ack = cstate['no_ack']
             if no_ack and not queue_obj.closed:
@@ -339,7 +341,6 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
                 logger.debug("close pika queue %r", queue_obj)
                 queue_obj.close(reason)
 
-        self._consume_state.clear()
         self._fail_published_messages(reason)
         TwistedProtocolConnection.connectionLost(self, reason)
 
@@ -473,19 +474,19 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
             "delivery_tag %r - callback invoked...",
             body, queue, delivery_tag)
 
-        if no_ack:
-            return defer.succeed(None)
-
         def err(e):
             logger.error("fail to process msg %r - error %s", msg, e)
+            if no_ack:
+                return None
             if e.check(ConnectionDone):
                 logger.debug("no active connection - we can't nack message")
             else:
                 self._handleFailedIncomingMessage(ch, amqp_msg)
 
         def ack(x):
-            logger.debug("send ack, delivery tag %r", delivery_tag)
-            ch.basic_ack(delivery_tag)
+            if not no_ack:
+                logger.debug("send ack, delivery tag %r", delivery_tag)
+                ch.basic_ack(delivery_tag)
 
         d.addCallbacks(ack, err)
         return d
@@ -510,8 +511,13 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
                 ch.basic_reject(delivery_tag, requeue=False)
         else:
             logger.debug("schedule rejection for dt %r", delivery_tag)
-            msg_reject_delay = self._consume_state[consumer_tag].get('requeue_delay') or 0
+            cstate = self._consume_state.get(consumer_tag)
 
+            if not cstate:
+                logger.debug("no consumer state for ct %r - skip msg failure", consumer_tag)
+                return
+
+            msg_reject_delay = self._consume_state[consumer_tag].get('requeue_delay') or 0
             if msg_reject_delay:
 
                 def nack_failed_message():
@@ -532,6 +538,10 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
                 logger.debug("reject message, dt %r", delivery_tag)
                 ch.basic_reject(delivery_tag, requeue=True)
 
+    def _generateConsumerTag(self):
+        type(self).__consumer_tag_cnt += 1
+        return "ct-%s" % self.__consumer_tag_cnt
+
     @defer.inlineCallbacks
     def consumeQueue(
             self, queue='', callback=None, no_ack=False,
@@ -540,6 +550,7 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
 
         assert callback
         logger.info("consume messages from queue %r" % queue)
+        consumer_tag = consumer_tag or self._generateConsumerTag()
 
         always_requeue = self.always_requeue if always_requeue is None else always_requeue
         requeue_delay = self.requeue_delay if requeue_delay is None else requeue_delay
@@ -552,6 +563,7 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
         queue_obj, ct = yield ch.basic_consume(
             queue=queue, no_ack=no_ack, consumer_tag=consumer_tag,
             **kwargs)
+        assert ct == consumer_tag
 
         ch.add_on_close_callback(functools.partial(self._on_consuming_channel_closed, ct))
         logger.debug("open channel (read) %r for ct %r", ch, ct)
@@ -569,14 +581,17 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
             always_requeue=(always_requeue or False),
         )
 
-        self._queueCounsumingLoop(
-            ct, queue_obj, callback, no_ack=no_ack, parallel=parallel)
+        # pika don't wait 'ConsumeOk' message
+        # HACK-1: run consuming-loop a bit later to avoid races
+        self.clock.callLater(
+            0.05, self._queueCounsumingLoop,
+            ct, queue_obj, callback, no_ack=no_ack, parallel=parallel,
+        )
+
+        # HACK-2: simulate waiting of 'ConsumeOk'
+        yield timed.sleep(0.1)
 
         logger.debug("consumer tag is %r", consumer_tag)
-
-        # FIXME: pika don't wait for ConsumeOK, simulate it
-        yield timed.sleep(0.01)
-
         defer.returnValue(ct)
 
     @defer.inlineCallbacks
@@ -588,10 +603,16 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
             requeue_delay=None,
             always_requeue=None,
     ):
+        consumer_tag = consumer_tag or self._generateConsumerTag()
 
         logger.debug("declare exclusive queue")
+        queue = "twoost-ec-%s" % uuid.uuid4().hex
         queue_method = yield self.declareQueue(
-            queue='', exclusive=True, arguments=queue_arguments)
+            queue=queue,
+            auto_delete=True,
+            arguments=queue_arguments,
+            exclusive=True,
+        )
         queue = queue_method.method.queue
 
         logger.debug("bind exclusive queue %r to exchange %r", queue, exchange)
@@ -613,7 +634,7 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
             always_requeue=always_requeue,
         )
 
-        self._exclusive_queues[ct] = queue, no_ack
+        defer.returnValue(ct)
 
     @defer.inlineCallbacks
     def cancelConsuming(self, consumer_tag):
@@ -622,23 +643,13 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
 
         cstate = self._consume_state.pop(consumer_tag, {})
         ch = cstate.get('channel')
+
         if ch:
             logger.debug("send basic.cancel method, ct %r", consumer_tag)
             c = yield ch.basic_cancel(consumer_tag=consumer_tag)
         else:
             logger.error("can't cancel reading consuming for %s", consumer_tag)
             c = None
-
-        queue, no_ack = self._exclusive_queues.pop(consumer_tag, (None, None))
-        if queue:
-            logger.debug("drop exclusive queue %r", queue)
-            try:
-                if no_ack:
-                    yield self._write_channel.queue_delete(queue=queue)
-                else:
-                    yield self._safewrite_channel.queue_delete(queue=queue)
-            except:
-                logger.exception("can't delete queue %r", queue)
 
         queue_obj = cstate.get('queue_obj')
         if queue_obj and not queue_obj.closed:
@@ -699,6 +710,7 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
         logger.info(
             "bind exchange %r to queue %r (routing key is %r)",
             exchange, queue, routing_key)
+
         return self._write_channel.queue_bind(
             queue=queue, exchange=exchange,
             routing_key=routing_key, arguments=arguments)
@@ -715,16 +727,10 @@ class _AMQPProtocol(TwistedProtocolConnection, object):
         return 'amqp'
 
 
-# -- client factory
-
-class AMQPClient(PersistentClientFactory):
+class AMQPFactory(pclient.PersistentClientFactory):
 
     protocol = _AMQPProtocol
-    proxiedMethods = ['publishMessage']
-    retryOnErrors = [ConnectionDone, _NotReadyForPublish]
-
-    _protocol_parameters = None
-    __consumer_tag_counter = 0
+    _protocol_instance = None
 
     def __init__(
             self,
@@ -734,17 +740,10 @@ class AMQPClient(PersistentClientFactory):
             password=None,
             heartbeat=None,
             prefetch_count=None,
-            disconnect_period=10800,
             requeue_delay=120,
             always_requeue=False,
-            retry_delay=20,
-            retry_max_count=2000,
+            **kwargs
     ):
-        # setup PersistentClientFactory
-        self.disconnectDelay = disconnect_period
-        self.retryMaxCount = retry_max_count
-        self.retryDelay = retry_delay
-
         # defaults for _AMQPProtocol
         self.prefetch_count = prefetch_count
         self.always_requeue = always_requeue
@@ -752,8 +751,7 @@ class AMQPClient(PersistentClientFactory):
 
         self._protocol_parameters = {
             'virtual_host': vhost,
-            'credentials': (
-                _PlainCredentials(user or 'guest', password or 'guest')),
+            'credentials': _PlainCredentials(user or 'guest', password or 'guest'),
             'heartbeat_interval': None,
             'ssl': None,
             'heartbeat_interval': heartbeat,
@@ -762,38 +760,17 @@ class AMQPClient(PersistentClientFactory):
 
         self.schema = schema
 
-        # transient state
-        self._consuming_callbacks = {}
-        self._consumed_queues_is_ready = {}
-        self._hm_deffers = []
-        self._handshaking_made = False
-        self._client_prepared = False
-        self._client = None
-
     def logPrefix(self):
         return 'amqp'
 
-    def _clientHandshakingMade(self, client):
-        self.clientReady(client)
-
-        self._handshaking_made = True
-        self._prepareClient()
-        logger.debug("client handshaking was made")
-
-        for c in self._hm_deffers:
-            if not c.called:
-                c.callback(True)
-
     def notifyHandshaking(self):
-        d = defer.Deferred()
-        if self._handshaking_made:
-            d.callback(True)
+        # deprecated
+        if self._protocol_instance:
+            return self.notifyProtocolReady()
         else:
-            self._hm_deffers.append(d)
-        return d
+            return defer.fail(Exception("No client"))
 
     def buildProtocol(self, addr):
-
         logger.debug("build amqp protocol, params %r", self._protocol_parameters)
         p = self.protocol(
             parameters=self._protocol_parameters,
@@ -802,121 +779,16 @@ class AMQPClient(PersistentClientFactory):
             requeue_delay=self.requeue_delay,
             always_requeue=self.always_requeue,
         )
-
-        self._handshaking_made = False
-        self._client_prepared = False
-
-        self._client = p
-        self._client.factory = self
-
-        p._on_handshaking_made.addCallback(
-            lambda _: self._clientHandshakingMade(p))
-
-        def fail_handshaking(e):
-            logger.error("handshaking failed due to %s", e)
-
-        p._on_handshaking_made.addErrback(fail_handshaking)
+        p.factory = self
+        self._protocol_instance = p
         return p
 
-    def _setHandshakingFlag(self, x):
-        self._handshaking_made = True
-        return x
-
     def clientConnectionLost(self, connector, reason):
-        if self._client and self._client.heartbeat:
+        if self._protocol_instance and self._protocol_instance.heartbeat:
             logger.debug("stop heartbeating")
-            self._client.heartbeat.stop()
-        PersistentClientFactory.clientConnectionLost(self, connector, reason)
-
-    @defer.inlineCallbacks
-    def _prepareClient(self):
-        logger.debug("setup consuming...")
-
-        for consumer_tag, consume in self._consuming_callbacks.items():
-            logger.debug(
-                "invoke consuming callback for consumer tag %r",
-                consumer_tag)
-            yield consume(self._client)
-            d = self._consumed_queues_is_ready.get(consumer_tag)
-            if d and not d.called:
-                d.callback(True)
-
-        # all saved queues are consumed
-        # allow `self._consumeAndSaveCallback` to send AMQP packages
-        self._client_prepared = True
-
-        for consumer_tag, d in self._consumed_queues_is_ready.items():
-            if not d.called:
-                logger.debug(
-                    "found %r in `_consumed_queues_is_ready`"
-                    " but not in `_consuming_callbacks`", consumer_tag)
-                d.errback(Exception("can't consume - bad state"))
-
-    def _generateConsumerTag(self):
-        logger.debug("generate new consumer tag")
-        self.__consumer_tag_counter += 1
-        consumer_tag = "ct-{0}".format(self.__consumer_tag_counter)
-        self._consumed_queues_is_ready[consumer_tag] = defer.Deferred()
-        return consumer_tag
-
-    @defer.inlineCallbacks
-    def _consumeAndSaveCallback(self, consumer_tag, consume):
-        logger.debug("setup consuming, ct %s consumer_tag", consumer_tag)
-        self._consuming_callbacks[consumer_tag] = consume
-        if self._client and self._client_prepared:
-            d = self._consumed_queues_is_ready[consumer_tag]
-            try:
-                yield consume(self._client)
-                d.callback(True)
-            except:
-                d.errback(failure.Failure())
-                raise
-        defer.returnValue(consumer_tag)
-
-    def consumeQueue(self, queue='', callback=None, **kwargs):
-
-        consumer_tag = self._generateConsumerTag()
-        logger.debug("consume from queue %r, contumer_tag %r, kwargs %r",
-                     queue, consumer_tag, kwargs)
-
-        def consume(amqp):
-            logger.debug("consume queue %r with ct %s ...", queue, consumer_tag)
-            return amqp.consumeQueue(
-                queue=queue, callback=callback, consumer_tag=consumer_tag, **kwargs)
-
-        return self._consumeAndSaveCallback(consumer_tag, consume)
-
-    def consumeExchange(self, exchange='', callback=None, **kwargs):
-
-        consumer_tag = self._generateConsumerTag()
-        logger.debug("consume from exchange %r, contumer_tag %r, kwargs %r",
-                     exchange, consumer_tag, kwargs)
-
-        def consume(amqp):
-            logger.debug("consume exchange %r with ct %s ...", exchange, consumer_tag)
-            return amqp.consumeExchange(
-                exchange=exchange, callback=callback, consumer_tag=consumer_tag, **kwargs)
-
-        return self._consumeAndSaveCallback(consumer_tag, consume)
-
-    @defer.inlineCallbacks
-    def cancelConsuming(self, consumer_tag):
-        logger.debug("_client - cancel consuming, consumer_tag %r", consumer_tag)
-
-        c = self._consuming_callbacks.pop(consumer_tag, None)
-        if c is None:
-            logger.warning("unknown consumer tag %r", consumer_tag)
-            return
-
-        if c and self._client:
-            d = self._consumed_queues_is_ready.get(consumer_tag)
-            if d:
-                logger.debug("wait for queue with ct %s...", consumer_tag)
-                consuming_installed = yield d
-                if consuming_installed and self._client and self._handshaking_made:
-                    # don't wait - no `yield`
-                    self._client.cancelConsuming(consumer_tag)
-                del self._consumed_queues_is_ready[consumer_tag]
+            self._protocol_instance.heartbeat.stop()
+        self._protocol_instance = None
+        pclient.PersistentClientFactory.clientConnectionLost(self, connector, reason)
 
 
 # -- config parsing
@@ -976,56 +848,131 @@ def loadSchema(schema):
 
 class _BaseConsumer(service.Service):
 
-    cancel_consuming_timeout = 5
+    cancel_consuming_timeout = 10
+    _protocol_instance = None
+    consumer_tag = None
 
     def __init__(
-            self, client, callback, parallel=0,
-            no_ack=False, deserialize=True,
+            self,
+            callback,
+            parallel=0,
+            no_ack=False,
+            deserialize=True,
             requeue_delay=None,
-            always_requeue=None):
+            always_requeue=None,
+    ):
 
-        self.client = client
         self.callback = callback
         self.deserialize = deserialize
         self.parallel = parallel
         self.no_ack = no_ack
         self.requeue_delay = requeue_delay
         self.always_requeue = always_requeue
+        self._active_callbacks = {}
+        self._active_callbacks_cnt = 0
+        self._consume_deferred = None
 
-    @defer.inlineCallbacks
+    def _cancelActiveCallbacks(self):
+        ds = list(self._active_callbacks.values())
+        self._active_callbacks.clear()
+        for d in ds:
+            d.cancel()
+
     def startService(self):
+        if self.running:
+            raise RuntimeError("service already running")
         logger.debug("start service %s", self)
         service.Service.startService(self)
-        self.consumer_key = yield self._consume()
+        p = self.parent.getProtocol()
+        if p:
+            self.clientProtocolReady(p)
 
     @defer.inlineCallbacks
     def stopService(self):
+
+        if not self.running:
+            raise RuntimeError("service already stopped")
+
+        if self._consume_deferred:
+            logger.debug("wait previous consuming request...")
+            timed.timeoutDeferred(self._consume_deferred, self.cancel_consuming_timeout)
+            try:
+                yield self._consume_deferred
+            except Exception:
+                logger.exception("upps")
+
+            logger.debug("too quick consume-unconsume - sleep for 0.5 sec")
+            yield timed.sleep(0.5)
+
         logger.debug("stop service %s", self)
-        yield timed.timeoutDeferred(
-            self.client.cancelConsuming(self.consumer_key),
-            self.cancel_consuming_timeout,
-        ).addErrback(logger.exception, "Can't cancel consuming")
-        service.Service.stopService(self)
+        p1 = self._protocol_instance
+        p2 = self.parent.getProtocol()
+
+        if p1 is p2 and self.consumer_tag:
+            logger.debug("protocol didn't change - cancel consuming")
+            d = p1.cancelConsuming(self.consumer_tag)
+            timed.timeoutDeferred(d, self.cancel_consuming_timeout)
+            try:
+                yield d
+            except Exception:
+                logger.exception("Can't cancel consuming")
+
+        self._cancelActiveCallbacks()
+
+        yield defer.maybeDeferred(service.Service.stopService, self)
+
+    def clientProtocolReady(self, protocol):
+
+        if not self.running:
+            logger.debug("consurme %r stopped, skip new protocol", self)
+            return
+
+        # setup _protocol_instance *before* consuming
+        self._protocol_instance = protocol
+        self._consume_deferred = self._consume(protocol)
+        self._consume_deferred.addCallback(
+            self.consumingStarted
+        ).addErrback(
+            self.consumingFailed
+        )
+
+    def consumingStarted(self, consumer_tag):
+        logger.debug("consuming started, ct %r", consumer_tag)
+        self.consumer_tag = consumer_tag
+        self._consume_deferred = None
+
+    def consumingFailed(self, fail):
+        logger.error("failed to consume %s: %s", self, fail)
+        self.consumer_tag = None
+        self._consume_deferred = None
 
     def onMessage(self, msg):
         logger.debug("receive message %r", msg)
+
+        self._active_callbacks_cnt += 1
+        cid = self._active_callbacks_cnt
+
+        def remove_ac(x):
+            self._active_callbacks.pop(cid, None)
+            return x
+
         data = deserialize(msg.body, msg.content_type) if self.deserialize else msg
-        return defer.maybeDeferred(self.callback, data)
+        d = self._active_callbacks[cid] = defer.maybeDeferred(self.callback, data)
+        return d.addBoth(remove_ac)
 
 
-class QueueConsumer(_BaseConsumer):
+class _QueueConsumer(_BaseConsumer):
 
     """Consumes AMQP queue & runs callback."""
 
-    def __init__(self, client, queue, callback,
-                 *args, **kwargs):
-        _BaseConsumer.__init__(self, client, callback, *args, **kwargs)
+    def __init__(self, queue, callback, *args, **kwargs):
+        _BaseConsumer.__init__(self, callback, *args, **kwargs)
         self.queue = queue
 
-    def _consume(self):
-        return self.client.consumeQueue(
-            self.queue,
-            self.onMessage,
+    def _consume(self, protocol):
+        return protocol.consumeQueue(
+            queue=self.queue,
+            callback=self.onMessage,
             parallel=self.parallel,
             no_ack=self.no_ack,
             requeue_delay=self.requeue_delay,
@@ -1033,72 +980,56 @@ class QueueConsumer(_BaseConsumer):
         )
 
 
-class ExchangeConsumer(_BaseConsumer):
+class _ExchangeConsumer(_BaseConsumer):
 
     """Consumes AMQP exchange & runs callback."""
-    def __init__(self, client, exchange, callback, *args, **kwargs):
-        _BaseConsumer.__init__(self, client, callback, *args, **kwargs)
+    def __init__(self, exchange, callback, routing_key='', *args, **kwargs):
+        _BaseConsumer.__init__(self, callback, *args, **kwargs)
         self.exchange = exchange
+        self.routing_key = routing_key
 
-    def _consume(self):
-        return self.client.consumeExchange(
-            self.exchange,
-            self.onMessage,
+    def _consume(self, protocol):
+        return protocol.consumeExchange(
+            exchange=self.exchange,
+            callback=self.onMessage,
             parallel=self.parallel,
             no_ack=self.no_ack,
             requeue_delay=self.requeue_delay,
             always_requeue=self.always_requeue,
+            routing_key=self.routing_key,
         )
 
 
-class _ClientWithConsumersContainer(service.MultiService):
+class AMQPService(object, pclient.PersistentClientService, service.MultiService):
+    # amqp service contains all conusumers as subservices
 
-    def __init__(self, client_service):
-        service.MultiService.__init__(self)
-        self.client_service = client_service
-
-    @defer.inlineCallbacks
-    def stopService(self):
-        yield service.MultiService.stopService(self)
-        yield self.client_service.stopService()
-
-    def startService(self):
-        self.client_service.startService()
-        service.MultiService.startService(self)
-
-
-class AMQPService(PersistentClientService):
-
-    name = 'amqps'
-    factory = AMQPClient
-    defaultPort = 5672
-
-    # ---
+    name = 'amqp'
+    protocolProxiedMethods = ['publishMessage']
 
     def __init__(self, *args, **kwargs):
-        self._connection_to_client_serivece_map = {}
-        PersistentClientService.__init__(self, *args, **kwargs)
+        service.MultiService.__init__(self)
+        pclient.PersistentClientService.__init__(self, *args, **kwargs)
 
-    def buildClientService(self, connection, clientFactory, params):
-        s = PersistentClientService.buildClientService(self, connection, clientFactory, params)
-        ss = _ClientWithConsumersContainer(s)
-        self._connection_to_client_serivece_map[connection] = ss
-        return ss
+    def needToRetryProtocolCall(self, f):
+        return f.check(ConnectionDone) or f.check(_NotReadyForPublish)
 
-    def setupQueueConsuming(
-            self,
-            connection,
-            queue,
-            callback,
-            no_ack=False,
-            parallel=0,
-            deserialize=True,
-            requeue_delay=120,
-            always_requeue=None,
-    ):
-        logger.debug("setup queue consuming for conn %r, queue %r", connection, queue)
-        qc = QueueConsumer(
-            client=self[connection],
+    def clientConnectionLost(self, reason):
+        p = self.getProtocol()
+        if p and p.heartbeat:
+            logger.debug("stop heartbeating")
+            p.heartbeat.stop()
+        return pclient.PersistentClientService.clientConnectionLost(self, reason)
+
+    def clientProtocolReady(self, protocol):
+        pclient.PersistentClientService.clientProtocolReady(self, protocol)
+        for ss in self.services:
+            ss.clientProtocolReady(protocol)
+
+    def setupQueueConsuming(self, queue, callback, no_ack=False, parallel=0,
+                            deserialize=True, requeue_delay=120, always_requeue=None):
+
+        logger.debug("setup queue consuming for conn %r, queue %r", self, queue)
+        qc = _QueueConsumer(
             callback=callback,
             queue=queue,
             parallel=parallel,
@@ -1107,24 +1038,14 @@ class AMQPService(PersistentClientService):
             requeue_delay=requeue_delay,
             always_requeue=always_requeue,
         )
-        self._connection_to_client_serivece_map[connection].addService(qc)
+        qc.setServiceParent(self)
+        return qc
 
-    def setupExchangeConsuming(
-            self,
-            connection,
-            exchange,
-            callback,
-            routing_key=None,
-            no_ack=False,
-            parallel=0,
-            deserialize=True,
-            requeue_delay=120,
-            always_requeue=None,
-    ):
-        logger.debug("setup exchange consuming for conn %r, exch %r", connection, exchange)
+    def setupExchangeConsuming(self, exchange, callback, routing_key='', requeue_delay=120,
+                               parallel=0, deserialize=True, no_ack=False, always_requeue=None):
 
-        qc = ExchangeConsumer(
-            client=self[connection],
+        logger.debug("setup exchange consuming for conn %r, exch %r", self, exchange)
+        qc = _ExchangeConsumer(
             callback=callback,
             exchange=exchange,
             routing_key=routing_key,
@@ -1134,26 +1055,20 @@ class AMQPService(PersistentClientService):
             requeue_delay=requeue_delay,
             always_requeue=always_requeue,
         )
-        self._connection_to_client_serivece_map[connection].addService(qc)
+        qc.setServiceParent(self)
+        return qc
 
-    def makeSender(
-            self,
-            connection,
-            exchange,
-            routing_key=None,
-            routing_key_fn=None,
-            content_type='json',
-            confirm=True,
-    ):
+    def makeSender(self, exchange, routing_key=None, routing_key_fn=None,
+                   content_type='json', confirm=True):
+
         assert routing_key is None or routing_key_fn is None
-
         logger.debug(
             "build sender callback for conn %r, " "exchange %r, ctype %s, confirm flag %r",
-            connection, exchange, content_type, confirm)
+            self, exchange, content_type, confirm)
 
         def send(data):
             rk = routing_key or (routing_key_fn and routing_key_fn(data)) or ''
-            return self[connection].publishMessage(
+            return self.publishMessage(
                 exchange=exchange,
                 routing_key=rk,
                 body=data,
@@ -1161,3 +1076,24 @@ class AMQPService(PersistentClientService):
                 confirm=confirm,
             )
         return send
+
+
+class AMQPCollectionService(pclient.PersistentClientsCollectionService):
+
+    name = 'amqps'
+    clientService = AMQPService
+    factory = AMQPService
+
+    defaultParams = {
+        'port': 5672,
+        'host': "localhost",
+    }
+
+    def setupQueueConsuming(self, connection, *args, **kwargs):
+        return self[connection].setupQueueConsuming(self, *args, **kwargs)
+
+    def setupExchangeConsuming(self, connection, *args, **kwargs):
+        return self[connection].setupExchangeConsuming(self, *args, **kwargs)
+
+    def makeSender(self, connection, *args, **kwargs):
+        return self[connection].makeSender(self, *args, **kwargs)

@@ -17,7 +17,7 @@ from twisted.internet.error import ConnectionClosed
 from twisted.python import failure
 from twisted.application import service
 
-from twoost._misc import required_attr, TheProxy
+from twoost._misc import TheProxy
 
 import logging
 logger = logging.getLogger(__name__)
@@ -55,11 +55,17 @@ class PersistentClientProtocol(protocol.Protocol):
         self._protocol_ready_notifiers.append(d)
         return d
 
-    def protocolReady(self, reason=None):
-        ds = self._protocol_ready_notifiers
+    def protocolFailed(self, reason=None):
+        ds = self._protocol_ready_notifiers or ()
         self._protocol_ready_notifiers = None
         for d in ds:
-            d.callback(reason if reason is not None else self)
+            d.errback(reason)
+
+    def protocolReady(self):
+        ds = self._protocol_ready_notifiers or ()
+        self._protocol_ready_notifiers = None
+        for d in ds:
+            d.callback(self)
 
 
 class PersistentClientService(service.Service):
@@ -88,6 +94,7 @@ class PersistentClientService(service.Service):
 
     # -- state
     clock = reactor
+
     _delayedRetry = None
     _connectingDeferred = None
     _protocol = None
@@ -150,19 +157,20 @@ class PersistentClientService(service.Service):
 
     # --- delayed calls
 
-    def needToRetryCall(self, f):
+    def needToRetryProtocolCall(self, f):
         return f.check(ConnectionClosed)
 
     def protocolCall(self, method_name, *args, **kwargs):
         logger.debug("on %s call %s(%r, %r)", self, method_name, args, kwargs)
 
-        if self._protocol and self._protocol_ready:
+        p = self.getProtocol()
+        if p:
             wm = getattr(self._protocol, method_name)
             logger.debug("on %s call %s(%r, %r)", wm, method_name, args, kwargs)
             d = defer.maybeDeferred(wm, *args, **kwargs)
             if self.callretry_delay:
                 def handle_connection_done(e):
-                    if self.needToRetryCall(method_name, e):
+                    if self.needToRetryProtocolCall(e):
                         return self._protocolCallDelayed(method_name, *args, **kwargs)
                     else:
                         return e
@@ -221,7 +229,7 @@ class PersistentClientService(service.Service):
 
     def _runDelayedCalls(self):
         logger.debug("run delayed calls on %s", self)
-        assert self._protocol and self._protocol_ready
+        assert self.getProtocol()
         smc = list(self._delayedCalls.values())
         self._delayedCalls.clear()
         for (name, args, kwargs), d in smc:
@@ -238,25 +246,30 @@ class PersistentClientService(service.Service):
 
     # --- connection stuff
 
-    def _onClientConnected(self, protocol):
+    def _clientProtocolProxyConnected(self, protocol_proxy):
+        assert isinstance(protocol_proxy, _PClientProtocolProxy)
+        return self.clientConnected(protocol_proxy._protocol)
+
+    def clientConnected(self, protocol):
         self._protocol = protocol
+
         if IPersistentClientProtocol.providedBy(protocol):
             prd = protocol.notifyProtocolReady()
             prd.addCallback(
-                self._onClientProtocolReady
+                lambda _: self.clientProtocolReady(protocol)
             ).addErrback(
-                self._onClientProtocolFailed
+                self.clientProtocolFailed
             )
         else:
-            self._onClientProtocolReady(None)
+            self.clientProtocolReady(protocol)
 
-    def _onClientConnectionFailed(self, reason):
-        logger.debug("connection on %s failed: %s", self, reason.getErrorMessage())
+    def clientConnectionFailed(self, reason):
+        logger.debug("connection on %s failed: %s", self, reason)
         self._cancelDisconnectCall()
         self.retryConnection()
 
-    def _onClientConnectionLost(self, reason):
-        logger.debug("connection on %s lost: %s", self, reason.getErrorMessage())
+    def clientConnectionLost(self, reason):
+        logger.debug("connection on %s lost: %s", self, reason)
         self._protocol = None
         self._cancelDisconnectCall()
         if self._protocolStoppingDeferred is not None:
@@ -265,17 +278,20 @@ class PersistentClientService(service.Service):
             d.callback(None)
         self.retryConnection()
 
-    def _onClientProtocolFailed(self, reason):
+    def clientProtocolFailed(self, reason):
         self._protocol_ready = False
         logger.error("%s protocol failed: %s", self, reason)
 
-    def _onClientProtocolReady(self, result):
+    def getProtocol(self):
+        if self._protocol and self._protocol_ready:
+            return self._protocol
+
+    def clientProtocolReady(self, protocol):
         logger.debug("client protocol ready")
         self._protocol_ready = True
         self.resetReconnectDelay()
         self._runDelayedCalls()
         self._scheduleDisconnect()
-        return result
 
     def _clearConnectionAttempt(self, result):
         self._connectingDeferred = None
@@ -341,9 +357,9 @@ class PersistentClientService(service.Service):
             ). addBoth(
                 self._clearConnectionAttempt
             ).addCallback(
-                self._onClientConnected
+                self._clientProtocolProxyConnected
             ).addErrback(
-                self._onClientConnectionFailed
+                self.clientConnectionFailed
             )
 
         self._delayedRetry = self.clock.callLater(_reconnect_delay, reconnector)
@@ -353,28 +369,28 @@ class PersistentClientService(service.Service):
         Call this method after a successful connection: it resets the _reconnect_delay and
         the retryConnection counter.
         """
-        self._reconnect_delay = self.reconnect_initial_delay
+        self._reconnect_delay = min(self.reconnect_initial_delay, self.reconnect_max_delay)
         self._reconnect_retries = 0
+        self._scheduleDisconnect()
 
-
-class PClientProtocolProxy(TheProxy):
+class _PClientProtocolProxy(TheProxy):
     """A proxy for a Protocol to provide connectionLost notification."""
 
     def __init__(self, protocol, clientService):
         TheProxy.__init__(self, protocol)
-        self.__protocol = protocol
-        self.__clientService = clientService
+        self._protocol = protocol
+        self._clientService = clientService
 
     def connectionLost(self, reason):
-        result = self.__protocol.connectionLost(reason)
-        self.__clientService._onClientConnectionLost(reason)
+        result = self._protocol.connectionLost(reason)
+        self._clientService.clientConnectionLost(reason)
         return result
 
 
 class _PClientProtocolFactoryProxy(TheProxy):
     """A wrapper for a ProtocolFactory to facilitate restarting Protocols."""
 
-    _protocolProxyFactory = PClientProtocolProxy
+    _protocolProxyFactory = _PClientProtocolProxy
 
     def __init__(self, protocolFactory, clientService):
         TheProxy.__init__(self, protocolFactory)
@@ -388,6 +404,7 @@ class _PClientProtocolFactoryProxy(TheProxy):
 
 
 class PersistentClientFactory(protocol.Factory):
+    # WARN: just Factory, not ClientFactory!
 
     def __init__(self, *args, **kwargs):
         pass
@@ -395,9 +412,9 @@ class PersistentClientFactory(protocol.Factory):
 
 class PersistentClientsCollectionService(service.MultiService):
 
-    factory = required_attr
+    factory = None
     clientService = PersistentClientService
-    protocolProxiedMethods = []
+    protocolProxiedMethods = None
     defaultParams = {}
 
     def __init__(self, connections):
@@ -416,12 +433,12 @@ class PersistentClientsCollectionService(service.MultiService):
         return endpoints.clientFromString(reactor, ep)
 
     def buildClientFactory(self, params):
-        # ignore `params`
-        return self.factory()
+        return self.factory(**params)
 
     def buildClientService(self, endpoint, factory, params):
         s = self.clientService(endpoint, factory, **params)
-        s.protocolProxiedMethods = self.protocolProxiedMethods
+        if self.protocolProxiedMethods:
+            s.protocolProxiedMethods = self.protocolProxiedMethods
         return s
 
     def _initClientService(self, connection, params):
@@ -435,7 +452,7 @@ class PersistentClientsCollectionService(service.MultiService):
         service = self.buildClientService(endpoint, factory, p)
 
         service.setName(connection)
-        self.addService(service)
+        service.setServiceParent(self)
 
     def __getitem__(self, name):
         return self.getServiceNamed(name)

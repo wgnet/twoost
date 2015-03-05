@@ -214,7 +214,7 @@ class DatabaseService(service.MultiService):
             logger.info("connect to db %r", db_name)
             dbpool = make_dbpool(db)
             dbpool.setName(db_name)
-            self.addService(dbpool)
+            dbpool.setServiceParent(self)
 
         logger.debug("all dbpools has been created")
 
