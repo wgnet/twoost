@@ -147,7 +147,6 @@ class DBUsingMixin(object):
     db_default = 'default'
 
     def __init__(self, dbs, *args, **kwargs):
-        assert isinstance(dbs, collections.Mapping)
         self.dbs = dbs
 
     def db_fetch_all(self, *sql_and_args, **kwargs):
