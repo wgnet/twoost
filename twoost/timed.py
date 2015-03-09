@@ -21,7 +21,7 @@ class TimeoutError(defer.CancelledError):
 
 def timeoutDeferred(d, timeout=120):
 
-    if timeout is None:
+    if not timeout:
         return d
 
     cancelled = [False]
@@ -47,23 +47,26 @@ def timeoutDeferred(d, timeout=120):
     return d.addBoth(cancel_canceller).addErrback(convert_ce_to_te)
 
 
-def withTimeout(seconds):
+def withTimeout(timeout):
+
+    if not timeout:
+        return lambda f: f
+
     def decorator(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             d = defer.maybeDeferred(fn, *args, **kwargs)
-            return timeoutDeferred(d, seconds)
+            return timeoutDeferred(d, timeout)
         return wrapper
     return decorator
 
 
-def withParallelLimit(limit, timeout=120):
+def withParallelLimit(limit):
+
+    if not limit:
+        return lambda f: f
 
     def decorator(fn):
-        if timeout is not None:
-            fn = withTimeout(timeout)(fn)
-        if not limit:
-            return fn
         semaphore = defer.DeferredSemaphore(limit)
 
         @functools.wraps(fn)

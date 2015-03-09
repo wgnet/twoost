@@ -14,7 +14,7 @@ from twisted.web import client, xmlrpc
 from twisted.internet import defer, reactor
 from twisted.python import reflect
 
-from twoost import web, timed
+from twoost import web
 
 
 import logging
@@ -145,15 +145,13 @@ class DumbRPCResource(web.LeafResourceMixin, web.Resource):
 
 class DumbRPCProxy(object):
 
-    def __init__(self, url, agent=None, timeout=60.0):
+    def __init__(self, url, agent=None):
         assert url
         self.url = url
-        self.timeout = timeout
         self.agent = agent or client.Agent(reactor)
-        self.callRemote = timed.withTimeout(self.timeout)(self._call_remote)
 
     @defer.inlineCallbacks
-    def _call_remote(self, method, *args):
+    def callRemote(self, method, *args):
 
         logger.debug("remote call to %r, method %r with args %r", self.url, method, args)
 
@@ -204,18 +202,14 @@ class XMLRPCResource(xmlrpc.XMLRPC):
 
 class XMLRPCProxy(object):
 
-    def __init__(self, url, agent=None, timeout=60,
-                 xmlrpclib_use_datetime=False, xmlrpclib_allow_none=True):
-
+    def __init__(self, url, agent=None, xmlrpclib_use_datetime=False, xmlrpclib_allow_none=True):
         self.url = url
-        self.timeout = timeout
         self.agent = agent or client.Agent(reactor)
-        self.callRemote = timed.withTimeout(self.timeout)(self._call_remote)
         self.xmlrpclib_allow_none = xmlrpclib_allow_none
         self.xmlrpclib_use_datetime = xmlrpclib_use_datetime
 
     @defer.inlineCallbacks
-    def _call_remote(self, method, *args):
+    def callRemote(self, method, *args):
 
         body = xmlrpc.payloadTemplate % (
             method,

@@ -29,7 +29,12 @@ class TwoostConnectionPool(ConnectionPool, service.Service):
             self.cp_init_conn = reflect.namedAny(self.cp_init_conn)
 
     def stopService(self):
+        logger.debug("stop dbpool %r", self)
         self.close()
+
+    def startService(self):
+        logger.debug("start dbpool %r", self)
+        self.start()
 
     def _disconnect_current(self):
         conn = self.connections.get(self.threadID())

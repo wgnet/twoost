@@ -318,7 +318,10 @@ if raven:
             reactor.listenUDP(0, self.protocol)
 
         def _send_data(self, data, addr):
-            self.protocol.transport.write(data, addr[4])
+            if self.protocol:
+                self.protocol.transport.write(data, addr[4])
+            else:
+                log.err("no active sentry protocol - skip %r", data)
 
     try:
         raven.Client.register_scheme('twisted+udp', TwistedUDPTransport)

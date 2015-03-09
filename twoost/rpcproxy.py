@@ -5,8 +5,7 @@ from twisted.application import service
 from twisted.python import reflect
 from twisted.web import client
 
-from twoost import httprpc, authhmac
-from twoost.timed import withTimeout
+from twoost import httprpc, authhmac, timed
 
 import logging
 logger = logging.getLogger(__name__)
@@ -18,14 +17,32 @@ __all__ = [
 ]
 
 
-class LoopRPCProxy(service.Service):
+class _BaseRPCService(service.Service):
+
+    def __init__(self, timeout=60, parallel=None):
+        self.timeout = 60
+        self.parallel = parallel
+
+    def callRemote(self, *args):
+        raise NotImplementedError
+
+    def makeCaller(self, method, timeout=None, parallel=None):
+
+        @timed.withParallelLimit(parallel if parallel is not None else self.parallel)
+        @timed.withTimeout(timeout if timeout is not None else self.timeout)
+        def call(*args):
+            return self.callRemote(method, *args)
+
+        return call
+
+
+class LoopRPCProxy(_BaseRPCService):
 
     def __init__(self, target, timeout=60.0):
+        _BaseRPCService.__init__(self, timeout)
         self.target = target
-        self.timeout = timeout
-        self.callRemote = withTimeout(timeout)(self._call_remote)
 
-    def _call_remote(self, method, *args):
+    def callRemote(self, method, *args):
         return getattr(self.target, method)(*args)
 
 
@@ -33,9 +50,10 @@ class _NoiselessHTTP11ClientFactory(client.HTTPConnectionPool._factory):
     noisy = False
 
 
-class _HTTPClientProxyService(service.Service):
+class _HTTPClientProxyService(_BaseRPCService):
 
-    def __init__(self, http_pool, proxy):
+    def __init__(self, http_pool, proxy, timeout=60):
+        _BaseRPCService.__init__(self, timeout)
         self.http_pool = http_pool
         self.proxy = proxy
 
@@ -85,8 +103,8 @@ def make_xmlrpc_proxy(params):
     timeout = params.get('timeout', 60.0)
     http_pool, agent = make_http_pool_and_agent(params)
     logger.debug("create xml-proxy, url %r", url)
-    proxy = httprpc.XMLRPCProxy(url, agent=agent, timeout=timeout)
-    return _HTTPClientProxyService(http_pool, proxy)
+    proxy = httprpc.XMLRPCProxy(url, agent=agent)
+    return _HTTPClientProxyService(http_pool, proxy, timeout=timeout)
 
 
 def make_dumbrpc_proxy(params):
@@ -94,8 +112,8 @@ def make_dumbrpc_proxy(params):
     timeout = params.get('timeout', 60.0)
     http_pool, agent = make_http_pool_and_agent(params)
     logger.debug("create dumprpc-proxy, url %r", url)
-    proxy = httprpc.DumbRPCProxy(url, agent=agent, timeout=timeout)
-    return _HTTPClientProxyService(http_pool, proxy)
+    proxy = httprpc.DumbRPCProxy(url, agent=agent)
+    return _HTTPClientProxyService(http_pool, proxy, timeout=timeout)
 
 
 def make_loop_proxy(params):
@@ -138,10 +156,8 @@ class RPCProxyService(service.MultiService):
             client.setName(client_name)
             client.setServiceParent(self)
 
-    def makeCaller(self, connection, method):
-        def call(*args):
-            return self[connection].callRemote(method, *args)
-        return call
+    def makeCaller(self, connection, method, timeout=None, parallel=None):
+        return self[connection].makeCaller(method, timeout=timeout, parallel=parallel)
 
     def __getitem__(self, proxy_name):
         return self.getServiceNamed(proxy_name)

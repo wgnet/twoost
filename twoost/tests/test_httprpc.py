@@ -30,7 +30,7 @@ class RPCTestAbstract(object):
 
         port = self.listening_port.getHost().port
         self.server_url = "http://localhost:" + str(port)
-        self.proxy = self.rpc_proxy_class(url=self.server_url, timeout=0.1)
+        self.proxy = self.rpc_proxy_class(url=self.server_url)
 
         self._sleeps = []
 
@@ -77,15 +77,6 @@ class RPCTestAbstract(object):
         }
         payload2 = yield self.proxy.callRemote('echo', payload)
         self.assertEqual(payload, payload2)
-
-    @defer.inlineCallbacks
-    def test_timeout(self):
-        try:
-            yield self.proxy.callRemote('sleep', 0.5)
-        except defer.CancelledError:
-            pass
-        else:
-            self.fail("expected CancelledError")
 
 
 class DumbRPCTest(RPCTestAbstract, TestCase):
