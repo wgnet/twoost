@@ -110,7 +110,7 @@ class PersistentClientService(service.Service):
         self.factory = factory
 
         self._delayedCalls = collections.OrderedDict()
-        self._reconnect_delay = self.reconnect_initial_delay
+        self.reconnect_delay = self.reconnect_initial_delay
         self._reconnect_retries = 0
 
         for p in [
@@ -127,15 +127,18 @@ class PersistentClientService(service.Service):
                 setattr(self, p, kwargs[p])
 
     def startService(self):
+        logger.debug("start pclient service %r", self)
         service.Service.startService(self)
-        self.retryConnection(_reconnect_delay=0.0)
+        self.retryConnection(reconnect_delay=0.0)
 
     @defer.inlineCallbacks
     def stopService(self):
 
+        logger.debug("stop pclient service %r", self)
         yield defer.maybeDeferred(service.Service.stopService, self)
 
         if self._delayedRetry is not None and self._delayedRetry.active():
+            logger.debug("cancel delayedRetry on %r", self)
             self._delayedRetry.cancel()
             self._delayedRetry = None
 
@@ -146,7 +149,7 @@ class PersistentClientService(service.Service):
             except defer.CancelledError:
                 pass
             except Exception:
-                logger.exception("cancel connecting")
+                logger.exception("cancel connecting of %r", self)
             finally:
                 self._connectingDeferred = None
 
@@ -193,7 +196,7 @@ class PersistentClientService(service.Service):
     def _protocolCallDelayed(self, method, *args, **kwargs):
 
         rd = self.callretry_delay
-        if not rd or rd < self._reconnect_delay:
+        if not rd or rd < self.reconnect_delay:
             return failure.Failure(self.noClientError("no active client"))
 
         if len(self._delayedCalls) > self.callretry_max_count:
@@ -305,11 +308,11 @@ class PersistentClientService(service.Service):
     def _scheduleDisconnect(self):
         self._cancelDisconnectCall()
         if self.disconnect_delay:
-            _reconnect_delay = random.normalvariate(
+            reconnect_delay = random.normalvariate(
                 self.disconnect_delay, self.reconnect_delay_jitter)
-            logger.debug("schedule to disconnect from %s in %s seconds", self, _reconnect_delay)
+            logger.debug("schedule to disconnect from %s in %s seconds", self, reconnect_delay)
             self._disconnectCallID = self.clock.callLater(
-                max(_reconnect_delay, 0),
+                max(reconnect_delay, 0),
                 self.dropConnection)
 
     @defer.inlineCallbacks
@@ -321,8 +324,8 @@ class PersistentClientService(service.Service):
             self._protocol.transport.loseConnection()
             yield self._protocolStoppingDeferred
 
-    def retryConnection(self, _reconnect_delay=None):
-        """ Have this connector connect again, after a suitable _reconnect_delay."""
+    def retryConnection(self, reconnect_delay=None):
+        """ Have this connector connect again, after a suitable reconnect_delay."""
 
         if not self.running:
             logger.debug("Service stopped, skip connection on %s", self.endpoint)
@@ -338,19 +341,20 @@ class PersistentClientService(service.Service):
             logger.debug("Abandoning connection for %s because another attempt.", self.endpoint)
             return
 
-        if _reconnect_delay is None:
-            self._reconnect_delay = min(
-                self._reconnect_delay * self.reconnect_delay_factor,
+        if reconnect_delay is None:
+            self.reconnect_delay = min(
+                self.reconnect_delay * self.reconnect_delay_factor,
                 self.reconnect_max_delay)
             if self.reconnect_delay_jitter:
-                self._reconnect_delay = random.normalvariate(
-                    self._reconnect_delay,
-                    self._reconnect_delay * self.reconnect_delay_jitter)
-            _reconnect_delay = self._reconnect_delay
+                self.reconnect_delay = random.normalvariate(
+                    self.reconnect_delay,
+                    self.reconnect_delay * self.reconnect_delay_jitter)
+            reconnect_delay = self.reconnect_delay
 
-        logger.debug("Will retryConnection %s in %s seconds.", self.endpoint, _reconnect_delay)
+        logger.debug("Will retry connection %s in %s seconds.", self.endpoint, reconnect_delay)
 
         def reconnector():
+            logger.debug("do reconnect of %r", self)
             self._reconnect_retries += 1
             self._connectingDeferred = self.endpoint.connect(
                 _PClientProtocolFactoryProxy(self.factory, self)
@@ -362,14 +366,14 @@ class PersistentClientService(service.Service):
                 self.clientConnectionFailed
             )
 
-        self._delayedRetry = self.clock.callLater(_reconnect_delay, reconnector)
+        self._delayedRetry = self.clock.callLater(reconnect_delay, reconnector)
 
     def resetReconnectDelay(self):
         """
-        Call this method after a successful connection: it resets the _reconnect_delay and
+        Call this method after a successful connection: it resets the reconnect_delay and
         the retryConnection counter.
         """
-        self._reconnect_delay = min(self.reconnect_initial_delay, self.reconnect_max_delay)
+        self.reconnect_delay = min(self.reconnect_initial_delay, self.reconnect_max_delay)
         self._reconnect_retries = 0
         self._scheduleDisconnect()
 

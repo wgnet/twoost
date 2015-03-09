@@ -210,6 +210,7 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
         TwistedProtocolConnection.__init__(
             self, _ConnectionParameters(**parameters))
 
+        self.virtual_host = parameters.get('virtual_host', "/")
         self.clock = reactor
         self.schema = schema
         self.prefetch_count = prefetch_count
@@ -231,7 +232,7 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
         self.ready.addErrback(self.handshakingFailed)
 
     def handshakingFailed(self, f):
-        logger.error("handshaking failed - disconnect due to %s", f)
+        logger.error("handshaking with %r failed - disconnect due to %s", self.virtual_host, f)
         self.transport.loseConnection()
         self.protocolFailed(failure)
 
@@ -256,7 +257,7 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
 
     @defer.inlineCallbacks
     def handshakingMade(self):
-        logger.info("handshaking with server was made")
+        logger.info("handshaking with %r was made", self.virtual_host)
 
         yield self._open_write_channel()
         yield self._open_safewrite_channel()
@@ -266,7 +267,7 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
             yield defer.maybeDeferred(
                 IAMQPSchema(self.schema).declareSchema,
                 _SchemaBuilderProxy(self))
-            logger.info("amqp schema has been declared")
+            logger.debug("amqp schema has been declared")
 
         self.ready_for_publish = True
         self.protocolReady()
@@ -549,7 +550,7 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
             consumer_tag=None, parallel=0, **kwargs):
 
         assert callback
-        logger.info("consume messages from queue %r" % queue)
+        logger.info("consume queue '%s/%s'", self.virtual_host, queue)
         consumer_tag = consumer_tag or self._generateConsumerTag()
 
         always_requeue = self.always_requeue if always_requeue is None else always_requeue
@@ -673,8 +674,9 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
             exclusive=False, auto_delete=False, arguments=None):
 
         logger.info(
-            "declare queue %r (passive=%d, "
+            "declare queue '%s/%s' (passive=%d, "
             "durable=%d, exclusive=%d, auto_delete=%d)",
+            self.virtual_host,
             queue, passive, durable, exclusive, auto_delete)
 
         if message_ttl is not None:
@@ -697,8 +699,9 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
             durable=False, auto_delete=False, internal=False, arguments=None):
 
         logger.info(
-            "declare exchange %r (type=%r, passive=%d, "
-            "durable=%d, auto_delete=%d, internal=%d)",
+            "declare exchange '%s/%s': type=%r, passive=%d, "
+            "durable=%d, auto_delete=%d, internal=%d",
+            self.virtual_host,
             exchange, exchange_type, passive, durable, auto_delete, internal)
 
         return self._write_channel.exchange_declare(
@@ -708,8 +711,8 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
 
     def bindQueue(self, exchange, queue, routing_key='', arguments=None):
         logger.info(
-            "bind exchange %r to queue %r (routing key is %r)",
-            exchange, queue, routing_key)
+            "bind exchange '%s/%s' to queue %r, routing key %r",
+            self.virtual_host, exchange, queue, routing_key)
 
         return self._write_channel.queue_bind(
             queue=queue, exchange=exchange,
@@ -717,9 +720,10 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
 
     def bindExchange(self, source, destination, routing_key='', arguments=None):
         logger.info(
-            "bind exchange %r to exchange %r (routing key is %r)",
+            "bind exchange '%s/%s' to exchange %r, routing key %r",
             destination, source, routing_key)
         return self._write_channel.exchange_bind(
+            self.virtual_host,
             destination=destination, source=source,
             routing_key=routing_key, arguments=arguments)
 
@@ -849,6 +853,7 @@ def loadSchema(schema):
 class _BaseConsumer(service.Service):
 
     cancel_consuming_timeout = 10
+    cancel_message_timeout = 20
     _protocol_instance = None
     consumer_tag = None
 
@@ -872,11 +877,29 @@ class _BaseConsumer(service.Service):
         self._active_callbacks_cnt = 0
         self._consume_deferred = None
 
+    @defer.inlineCallbacks
     def _cancelActiveCallbacks(self):
+
+        cancelled = [0]
         ds = list(self._active_callbacks.values())
         self._active_callbacks.clear()
+
+        def ignore_cancelled_error(f):
+            f.trap(defer.CancelledError)
+            cancelled[0] += 1
+
+        def log_error(f):
+            logger.error("callback %s failed: %s", self.callback, f)
+
         for d in ds:
+            timed.timeoutDeferred(d, self.cancel_message_timeout)
+            d.addErrback(ignore_cancelled_error)
+            d.addErrback(log_error)
             d.cancel()
+
+        yield defer.gatherResults(ds)
+        if cancelled[0]:
+            logger.debug("cancelled %d msgs for callback %s", self.callback)
 
     def startService(self):
         if self.running:
@@ -919,8 +942,7 @@ class _BaseConsumer(service.Service):
             except Exception:
                 logger.exception("Can't cancel consuming")
 
-        self._cancelActiveCallbacks()
-
+        yield self._cancelActiveCallbacks()
         yield defer.maybeDeferred(service.Service.stopService, self)
 
     def clientProtocolReady(self, protocol):
@@ -1030,7 +1052,7 @@ class AMQPService(object, pclient.PersistentClientService):
     @defer.inlineCallbacks
     def stopService(self):
         yield self.consumer_services.stopService()
-        yield defer.maybeDeferred(pclient.PersistentClientService.startService, self)
+        yield defer.maybeDeferred(pclient.PersistentClientService.stopService, self)
 
     def needToRetryProtocolCall(self, f):
         return f.check(ConnectionDone) or f.check(_NotReadyForPublish)
