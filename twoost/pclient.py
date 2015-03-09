@@ -373,6 +373,7 @@ class PersistentClientService(service.Service):
         self._reconnect_retries = 0
         self._scheduleDisconnect()
 
+
 class _PClientProtocolProxy(TheProxy):
     """A proxy for a Protocol to provide connectionLost notification."""
 

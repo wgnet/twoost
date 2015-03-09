@@ -880,10 +880,11 @@ class _BaseConsumer(service.Service):
 
     def startService(self):
         if self.running:
-            raise RuntimeError("service already running")
+            logger.debug("service %r already started", self)
+            return
         logger.debug("start service %s", self)
         service.Service.startService(self)
-        p = self.parent.getProtocol()
+        p = self.parent.amqp_service.getProtocol()
         if p:
             self.clientProtocolReady(p)
 
@@ -891,7 +892,8 @@ class _BaseConsumer(service.Service):
     def stopService(self):
 
         if not self.running:
-            raise RuntimeError("service already stopped")
+            return
+            logger.debug("service %r already stopped", self)
 
         if self._consume_deferred:
             logger.debug("wait previous consuming request...")
@@ -906,7 +908,7 @@ class _BaseConsumer(service.Service):
 
         logger.debug("stop service %s", self)
         p1 = self._protocol_instance
-        p2 = self.parent.getProtocol()
+        p2 = self.parent.amqp_service.getProtocol()
 
         if p1 is p2 and self.consumer_tag:
             logger.debug("protocol didn't change - cancel consuming")
@@ -924,7 +926,7 @@ class _BaseConsumer(service.Service):
     def clientProtocolReady(self, protocol):
 
         if not self.running:
-            logger.debug("consurme %r stopped, skip new protocol", self)
+            logger.debug("consumer %r stopped, skip new protocol", self)
             return
 
         # setup _protocol_instance *before* consuming
@@ -1000,15 +1002,35 @@ class _ExchangeConsumer(_BaseConsumer):
         )
 
 
-class AMQPService(object, pclient.PersistentClientService, service.MultiService):
+class _ConsumersContainer(service.MultiService):
+
+    def __init__(self, amqp_service):
+        service.MultiService.__init__(self)
+        self.amqp_service = amqp_service
+
+
+class AMQPService(object, pclient.PersistentClientService):
     # amqp service contains all conusumers as subservices
 
     name = 'amqp'
     protocolProxiedMethods = ['publishMessage']
 
     def __init__(self, *args, **kwargs):
-        service.MultiService.__init__(self)
         pclient.PersistentClientService.__init__(self, *args, **kwargs)
+        self.consumer_services = _ConsumersContainer(self)
+
+    def startService(self):
+        pclient.PersistentClientService.startService(self)
+        self.consumer_services.startService()
+
+    def privilegedStartService(self):
+        pclient.PersistentClientService.privilegedStartService(self)
+        self.consumer_services.privilegedStartService()
+
+    @defer.inlineCallbacks
+    def stopService(self):
+        yield self.consumer_services.stopService()
+        yield defer.maybeDeferred(pclient.PersistentClientService.startService, self)
 
     def needToRetryProtocolCall(self, f):
         return f.check(ConnectionDone) or f.check(_NotReadyForPublish)
@@ -1022,7 +1044,7 @@ class AMQPService(object, pclient.PersistentClientService, service.MultiService)
 
     def clientProtocolReady(self, protocol):
         pclient.PersistentClientService.clientProtocolReady(self, protocol)
-        for ss in self.services:
+        for ss in self.consumer_services.services:
             ss.clientProtocolReady(protocol)
 
     def setupQueueConsuming(self, queue, callback, no_ack=False, parallel=0,
@@ -1038,7 +1060,7 @@ class AMQPService(object, pclient.PersistentClientService, service.MultiService)
             requeue_delay=requeue_delay,
             always_requeue=always_requeue,
         )
-        qc.setServiceParent(self)
+        qc.setServiceParent(self.consumer_services)
         return qc
 
     def setupExchangeConsuming(self, exchange, callback, routing_key='', requeue_delay=120,
@@ -1055,8 +1077,12 @@ class AMQPService(object, pclient.PersistentClientService, service.MultiService)
             requeue_delay=requeue_delay,
             always_requeue=always_requeue,
         )
-        qc.setServiceParent(self)
+        qc.setServiceParent(self.consumer_services)
         return qc
+
+    def unsetupConsuming(self, consumer):
+        assert isinstance(consumer, _BaseConsumer)
+        self.consumer_services.removeService(consumer)
 
     def makeSender(self, exchange, routing_key=None, routing_key_fn=None,
                    content_type='json', confirm=True):
