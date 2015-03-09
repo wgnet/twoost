@@ -1082,7 +1082,7 @@ class AMQPCollectionService(pclient.PersistentClientsCollectionService):
 
     name = 'amqps'
     clientService = AMQPService
-    factory = AMQPService
+    factory = AMQPFactory
 
     defaultParams = {
         'port': 5672,
@@ -1090,10 +1090,10 @@ class AMQPCollectionService(pclient.PersistentClientsCollectionService):
     }
 
     def setupQueueConsuming(self, connection, *args, **kwargs):
-        return self[connection].setupQueueConsuming(self, *args, **kwargs)
+        return self[connection].setupQueueConsuming(*args, **kwargs)
 
     def setupExchangeConsuming(self, connection, *args, **kwargs):
-        return self[connection].setupExchangeConsuming(self, *args, **kwargs)
+        return self[connection].setupExchangeConsuming(*args, **kwargs)
 
     def makeSender(self, connection, *args, **kwargs):
-        return self[connection].makeSender(self, *args, **kwargs)
+        return self[connection].makeSender(*args, **kwargs)
