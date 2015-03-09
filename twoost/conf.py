@@ -3,100 +3,77 @@
 import types
 import os
 import uuid
-import copy
 import collections
 
 from zope import interface
-from twisted.python import components
+from twisted.python import components, reflect
+from twoost._misc import dd_merge
 
 
 __all__ = [
     'settings',
     'load_conf_py',
+    'load_conf_obj',
+    'load_conf_json',
+    'load_conf_yaml',
     'prop_merge',
     'prop_lazy',
     'prop_alter',
     'prop_dynamic',
-    'dd_merge',
     'IConfigProvider',
     'Config',
 ]
 
 
-def dd_merge(a, b):
-    """merges `b` into `a` and return merged result"""
-
-    if isinstance(a, collections.MutableSequence):
-        if isinstance(b, collections.Sequence):
-            a = copy.copy(a)
-            a.extend(b)
-            return a
-        else:
-            raise ValueError("cannot merge non-list into list", a, b)
-
-    if isinstance(a, collections.MutableSet):
-        if isinstance(b, collections.Set):
-            a = copy.copy(a)
-            a.update(b)
-            return a
-        else:
-            raise ValueError("cannot merge non-set into set", a, b)
-
-    if isinstance(a, collections.MutableMapping):
-        if isinstance(b, collections.Mapping):
-            a = copy.copy(a)
-            for key in b:
-                if key in a:
-                    a[key] = dd_merge(a[key], b[key])
-                else:
-                    a[key] = b[key]
-            return a
-        else:
-            raise ValueError("cannot merge non-dict into dict", a, b)
-
-    else:
-        return b
-
-
-def prop_lazy(fn, *args, **kwargs):
-    return _magic_prop(
-        lambda root_config, prop_name, prev_val_fn: fn(*args, **kwargs))
-
-
-def prop_alter(fn, *args, **kwargs):
-    return _magic_prop(
-        lambda root_config, prop_name, prev_val_fn: fn(prev_val_fn(), *args, **kwargs))
-
-
-def prop_dynamic(fn, *args, **kwargs):
-    return _magic_prop(
-        lambda root_config, prop_name, prev_val_fn: fn(root_config, *args, **kwargs))
-
-
-def prop_merge(data):
-    return _magic_prop(
-        lambda root_config, prop_name, prev_val_fn: dd_merge(prev_val_fn(), data))
+def _coerce_conf_file(fn):
+    fn = os.path.abspath(os.path.expandvars(os.path.expanduser(fn)))
+    if not os.path.exists(fn):
+        raise IOError("config file %r not found" % fn)
+    return fn
 
 
 def load_conf_py(fname):
     import imp
-    fname = os.path.abspath(os.path.expandvars(os.path.expanduser(fname)))
-    if not os.path.exists(fname):
-        raise IOError("config file %r not found" % fname)
+    fname = _coerce_conf_file(fname)
     return imp.load_source(fname, fname)
+
+
+def load_conf_obj(obj):
+    if isinstance(obj, basestring):
+        obj = reflect.namedAny(obj)
+    return IConfigProvider(obj)
 
 
 def load_conf_json(fname):
     import json
-    fname = os.path.abspath(os.path.expandvars(os.path.expanduser(fname)))
-    if not os.path.exists(fname):
-        raise IOError("config file %r not found" % fname)
-    with open(fname) as f:
+    with open(_coerce_conf_file(fname)) as f:
         return dict(json.load(f))
 
 
-# boxed fn for lazy/dynamic properties
-_magic_prop = collections.namedtuple('_magic_prop', 'fn')
+def load_conf_yaml(fname):
+    import yaml
+    with open(_coerce_conf_file(fname)) as f:
+        return yaml.load(f)
+
+
+def prop_lazy(fn, *args, **kwargs):
+    return _prop_magic(
+        lambda root_config, prop_name, prev_val_fn: fn(*args, **kwargs))
+
+
+def prop_alter(fn, *args, **kwargs):
+    return _prop_magic(
+        lambda root_config, prop_name, prev_val_fn: fn(prev_val_fn(), *args, **kwargs))
+
+
+def prop_dynamic(fn, *args, **kwargs):
+    return _prop_magic(
+        lambda root_config, prop_name, prev_val_fn: fn(root_config, *args, **kwargs))
+
+
+def prop_merge(data):
+    return _prop_magic(
+        lambda root_config, prop_name, prev_val_fn: dd_merge(prev_val_fn(), data))
 
 
 class IConfigProvider(interface.Interface):
@@ -142,7 +119,7 @@ class _ModuleAdapter(object):
             if k == k.upper()
         )
 
-    def get(self, name, default):
+    def get(self, name, default=None):
         if name in self.__keys:
             return getattr(self.module, name)
         else:
@@ -158,7 +135,11 @@ class _ModuleAdapter(object):
 components.registerAdapter(_ModuleAdapter, types.ModuleType, IConfigProvider)
 interface.classImplements(dict, IConfigProvider)
 
-# ---
+
+# --- impl
+
+# boxed fn for lazy/dynamic properties
+_prop_magic = collections.namedtuple('_prop_magic', 'fn')
 
 
 class ImmutableSettings(object):
@@ -183,7 +164,7 @@ class ImmutableSettings(object):
                 v = conf.get(key, nope)
                 if v is nope:
                     pass
-                elif isinstance(v, _magic_prop):
+                elif isinstance(v, _prop_magic):
                     return v.fn(self, key, prev_val_fn)
                 else:
                     return v

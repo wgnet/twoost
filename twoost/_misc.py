@@ -2,9 +2,11 @@
 
 import re
 import os
+import copy
 import errno
 import functools
 import itertools
+import collections
 
 import zope.interface
 
@@ -111,3 +113,39 @@ def mkdir_p(path):
             pass
         else:
             raise
+
+
+def dd_merge(a, b):
+    """merges `b` into `a` and return merged result"""
+
+    if isinstance(a, collections.MutableSequence):
+        if isinstance(b, collections.Sequence):
+            a = copy.copy(a)
+            a.extend(b)
+            return a
+        else:
+            raise ValueError("cannot merge non-list into list", a, b)
+
+    if isinstance(a, collections.MutableSet):
+        if isinstance(b, collections.Set):
+            a = copy.copy(a)
+            a.update(b)
+            return a
+        else:
+            raise ValueError("cannot merge non-set into set", a, b)
+
+    if isinstance(a, collections.MutableMapping):
+        if isinstance(b, collections.Mapping):
+            a = copy.copy(a)
+            for key in b:
+                if key in a:
+                    a[key] = dd_merge(a[key], b[key])
+                else:
+                    a[key] = b[key]
+            return a
+        else:
+            raise ValueError("cannot merge non-dict into dict", a, b)
+
+    else:
+        return b
+
