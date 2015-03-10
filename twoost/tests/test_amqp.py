@@ -208,9 +208,71 @@ class ReconnectTest(BaseTest):
         yield sql.stopService()
 
     @defer.inlineCallbacks
+    def test_reject_strategies(self):
+
+        self.client.reconnect_max_delay = 0.01
+        yield self.client.dropConnection()
+        self.publish = True
+
+        def rcv(x):
+            self.messages_cnt += 1
+            if self.publish:
+                raise Exception("some error here")
+
+        @defer.inlineCallbacks
+        def doche(onerror):
+
+            yield self.client.dropConnection()
+            yield self.clearQueue(QX)
+            self.messages_cnt = 0
+
+            sql = self.client.setupQueueConsuming(
+                QX, rcv, on_error=onerror, requeue_delay=0.1)
+
+            self.publish = True
+            yield self.client.publishMessage(
+                exchange='', routing_key=QX, body=("***" + onerror))
+
+            yield sleep(0.95)
+            x1 = self.messages_cnt
+            self.messages_cnt = 0
+
+            yield self.client.dropConnection()
+            yield sleep(0.95)
+            x2 = self.messages_cnt
+            self.messages_cnt = 0
+
+            yield self.client.dropConnection()
+            yield sleep(0.95)
+            x3 = self.messages_cnt
+            self.messages_cnt = 0
+
+            yield sql.stopService()
+            defer.returnValue((x1, x2, x3))
+
+        x = yield doche('reject')
+        self.assertEqual((1, 0, 0), x, "msg rejected")
+
+        x = yield doche('requeue_once')
+        self.assertEqual((2, 0, 0), x, "requeue once")
+
+        x = yield doche('requeue_forever')
+        self.assertEqual((9, 9, 9), x, "requeue forever")
+
+        x = yield doche('requeue_hold')
+        self.assertEqual((2, 1, 1), x, "msg holded")
+
+        x = yield doche('do_nothing')
+        self.assertEqual((1, 1, 1), x, "msg rejected")
+
+        yield self.client.dropConnection()  # clear holded messages
+        yield self.clearQueue(QX)
+        self.messages_cnt = 0
+
+    @defer.inlineCallbacks
     def test_invalid_handler(self):
 
-        self.client.maxDelay = 0.01
+        self.client.reconnect_max_delay = 0.01
         yield self.client.dropConnection()
 
         def rcv(x):
@@ -220,8 +282,8 @@ class ReconnectTest(BaseTest):
 
         sql = self.client.setupQueueConsuming(
             QX, rcv,
+            on_error='requeue_hold',
             requeue_delay=0.2,
-            always_requeue=True,
         )
         yield sleep(0.1)
 
@@ -249,7 +311,7 @@ class ReconnectTest(BaseTest):
     def test_outgoing_queue(self):
 
         # TODO: duplication of 'test_reconnection', fix it
-        self.client.maxDelay = 0.1
+        self.client.reconnect_max_delay = 0.1
         processed_x = set()
 
         def rcv_unsafe(x):

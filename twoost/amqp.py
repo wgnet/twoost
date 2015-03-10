@@ -193,16 +193,23 @@ class _SchemaBuilderProxy(components.proxyForInterface(IAMQPSchemaBuilder)):
 
 class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol):
 
-    delayed_rejections_limit = 10000
+    ON_ERROR_STRATEGIES = (
+        'requeue_once',          # requeue reject only redelivered messages
+        'requeue_forever',  # requeue *all* messages to same queue inf times
+        'reject',           # reject all messages (with delay `requeue_delay`)
+        'requeue_hold',     # hold only *redelivered* messages until reconnect
+        'do_nothing',       # do nothing - hold *all* messages until reconnect
+    )
     __consumer_tag_cnt = 0
 
     def __init__(
             self,
             parameters,
             schema=None,
+            on_error='requeue',
             prefetch_count=None,
-            always_requeue=False,
             requeue_delay=None,
+            requeue_max_count=None,
             **kwargs
     ):
 
@@ -210,20 +217,21 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
         TwistedProtocolConnection.__init__(
             self, _ConnectionParameters(**parameters))
 
-        self.virtual_host = parameters.get('virtual_host', "/")
+        self.virtual_host = parameters.get('virtual_host') or ""
         self.clock = reactor
         self.schema = schema
         self.prefetch_count = prefetch_count
-        self.always_requeue = always_requeue
-        self.requeue_delay = requeue_delay
 
+        assert not on_error or on_error in self.ON_ERROR_STRATEGIES
+        self.on_error = on_error or 'requeue'
+        self.requeue_max_count = requeue_max_count if requeue_max_count is not None else 50000
+        self.requeue_delay = requeue_delay if requeue_delay is not None else 120
+
+        # -- state
         self._published_messages = {}
-        self._consume_state = {}
-
-        # FIXME: replace with `ttl`
-        self._failed_msg_rej_tasks = {}
-
-        self.ready_for_publish = False
+        self._consumer_state = {}
+        self._delayed_requeue_tasks = {}
+        self._ready_for_publish = False
 
     def connectionMade(self):
         logger.debug("amqp connection was made")
@@ -269,14 +277,14 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
                 _SchemaBuilderProxy(self))
             logger.debug("amqp schema has been declared")
 
-        self.ready_for_publish = True
+        self._ready_for_publish = True
         self.protocolReady()
 
     def _on_consuming_channel_closed(self, ct, channel, reply_code, reply_text):
         logger.error(
             "server closed channel, ct %r, reply_code %s, reply_text %s!",
             ct, reply_code, reply_text)
-        s = self._consume_state.pop(ct, None)
+        s = self._consumer_state.pop(ct, None)
         if not s:
             return
         logger.debug("reconsume queue, prev state is %r", s)
@@ -306,9 +314,7 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
         delivery_tag = a.method.delivery_tag
         method_name = type(a.method).__name__
         ack = method_name == 'Ack'
-        deferred_method = (
-            defer.Deferred.callback if ack
-            else defer.Deferred.errback)
+        deferred_method = (defer.Deferred.callback if ack else defer.Deferred.errback)
 
         if a.method.multiple:
             logger.debug("multiple confirm - method %r, delivery_tag %d ...",
@@ -327,10 +333,10 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
     def connectionLost(self, reason):
 
         logger.debug("connection lost due to %r", reason)
-        self.ready_for_publish = None
+        self._ready_for_publish = None
 
-        cstates = list(self._consume_state.items())
-        self._consume_state.clear()
+        cstates = list(self._consumer_state.items())
+        self._consumer_state.clear()
 
         for ct, cstate in cstates:
             queue_obj = cstate['queue_obj']
@@ -356,7 +362,7 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
             message_ttl=None,
             content_type=None, properties=None, confirm=True):
 
-        if not self.ready_for_publish:
+        if not self._ready_for_publish:
             raise _NotReadyForPublish("not ready for publish - channel in wrong state")
 
         data = serialize(body, content_type)
@@ -448,7 +454,7 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
                 logger.debug("nack message, delivery tag %r", dt)
                 ch.basic_reject(delivery_tag=dt)
 
-        rej_tasks = self._failed_msg_rej_tasks.pop(consumer_tag, {})
+        rej_tasks = self._delayed_requeue_tasks.pop(consumer_tag, {})
         for dt, (t, ch) in rej_tasks.items():
             if do_reject:
                 t.cancel()
@@ -498,46 +504,74 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
         consumer_tag = msg.consumer_tag
         redelivered = msg.redelivered
 
-        rej_tasks_count = len(
-            self._failed_msg_rej_tasks.get(consumer_tag, ()))
+        cstate = self._consumer_state[consumer_tag]
+        if not cstate:
+            logger.debug("no consumer state for ct %r - skip msg failure", consumer_tag)
+            return
 
-        if redelivered or rej_tasks_count > self.delayed_rejections_limit:
-            if self._consume_state[consumer_tag].get('always_requeue'):
-                logger.debug(
-                    "message %r already has `redelivered` bit, "
-                    "hold it (don't nack nor ack)",
-                    delivery_tag)
-            else:
-                logger.error("reject message (no requeue): %r", msg)
-                ch.basic_reject(delivery_tag, requeue=False)
-        else:
-            logger.debug("schedule rejection for dt %r", delivery_tag)
-            cstate = self._consume_state.get(consumer_tag)
+        rej_type = cstate.get('on_error') or self.on_error
 
-            if not cstate:
-                logger.debug("no consumer state for ct %r - skip msg failure", consumer_tag)
-                return
+        rej_tasks_count = len(self._delayed_requeue_tasks.get(consumer_tag, ()))
+        too_many_rejs = rej_tasks_count > self.requeue_max_count
 
-            msg_reject_delay = self._consume_state[consumer_tag].get('requeue_delay') or 0
-            if msg_reject_delay:
+        need_requeue = (
+            rej_type == 'requeue_forever'
+            or (rej_type == 'requeue_once' and not redelivered)
+            or (rej_type == 'requeue_hold' and not redelivered)
+        )
+        need_reject = rej_type == 'reject' or (rej_type == 'requeue_once' and redelivered)
 
-                def nack_failed_message():
-                    logger.debug("reject message, dt %r", delivery_tag)
-                    ch.basic_reject(delivery_tag, requeue=True)
-                    m = self._failed_msg_rej_tasks.get(consumer_tag)
+        # TODO: log exception
+
+        if rej_type == 'do_nothing':
+            logger.debug("eat message failure: %r", msg)
+            return
+
+        elif redelivered and rej_type == 'requeue_hold':
+            logger.debug("message %r already has `redelivered` bit, "
+                         "hold it (don't nack nor ack)", delivery_tag)
+            return
+
+        elif need_reject and too_many_rejs:
+            logger.error("reject message without delay: %r", msg)
+            ch.basic_reject(delivery_tag, requeue=False)
+
+        elif need_requeue and too_many_rejs:
+            logger.error("requeue message without delay: %r", msg)
+            ch.basic_reject(delivery_tag, requeue=True)
+
+        elif too_many_rejs and rej_type == 'default':
+            logger.error("requeue message without delay: %r", msg)
+            ch.basic_reject(delivery_tag, requeue=True)
+
+        elif need_reject or need_requeue:
+            msg_requeue_delay = cstate.get('requeue_delay') or self.requeue_delay
+
+            logger.debug("schedule requeue for dt %r", delivery_tag)
+            cstate = self._consumer_state.get(consumer_tag)
+
+            if msg_requeue_delay:
+                def reject_message():
+                    logger.debug("reject/requeue message, dt %r", delivery_tag)
+                    ch.basic_reject(delivery_tag, requeue=need_requeue)
+                    m = self._delayed_requeue_tasks.get(consumer_tag)
                     if m is not None:
                         m.pop(delivery_tag, None)
                     if m is not None and not m:
-                        del self._failed_msg_rej_tasks[consumer_tag]
+                        del self._delayed_requeue_tasks[consumer_tag]
 
-                fmrt = self._failed_msg_rej_tasks.setdefault(consumer_tag, {})
+                fmrt = self._delayed_requeue_tasks.setdefault(consumer_tag, {})
                 assert delivery_tag not in fmrt
-                t = self.clock.callLater(msg_reject_delay, nack_failed_message)
+                t = self.clock.callLater(msg_requeue_delay, reject_message)
                 fmrt[delivery_tag] = t, ch
                 logger.debug("fmrt task is %r, dt %r", t, delivery_tag)
+
             else:
                 logger.debug("reject message, dt %r", delivery_tag)
                 ch.basic_reject(delivery_tag, requeue=True)
+
+        else:
+            logger.error("unknown reject type %r", rej_type)
 
     def _generateConsumerTag(self):
         type(self).__consumer_tag_cnt += 1
@@ -546,15 +580,13 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
     @defer.inlineCallbacks
     def consumeQueue(
             self, queue='', callback=None, no_ack=False,
-            requeue_delay=None, always_requeue=None,
-            consumer_tag=None, parallel=0, **kwargs):
+            requeue_delay=None, on_error=None,
+            consumer_tag=None, parallel=0,
+            **kwargs):
 
         assert callback
         logger.info("consume queue '%s/%s'", self.virtual_host, queue)
         consumer_tag = consumer_tag or self._generateConsumerTag()
-
-        always_requeue = self.always_requeue if always_requeue is None else always_requeue
-        requeue_delay = self.requeue_delay if requeue_delay is None else requeue_delay
 
         ch = yield self.channel()
         if self.prefetch_count is not None:
@@ -569,7 +601,7 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
         ch.add_on_close_callback(functools.partial(self._on_consuming_channel_closed, ct))
         logger.debug("open channel (read) %r for ct %r", ch, ct)
 
-        self._consume_state[ct] = dict(
+        self._consumer_state[ct] = dict(
             channel=ch,
             queue_obj=queue_obj,
             ct=ct,
@@ -578,8 +610,8 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
             parallel=parallel,
             kwargs=kwargs,
             queue=queue,
-            requeue_delay=(requeue_delay or 0),
-            always_requeue=(always_requeue or False),
+            requeue_delay=requeue_delay,
+            on_error=on_error,
         )
 
         # pika don't wait 'ConsumeOk' message
@@ -602,7 +634,7 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
             parallel=0, consumer_tag=None, routing_key='',
             bind_arguments=None, queue_arguments=None,
             requeue_delay=None,
-            always_requeue=None,
+            on_error=None,
     ):
         consumer_tag = consumer_tag or self._generateConsumerTag()
 
@@ -632,7 +664,7 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
             parallel=parallel,
             no_ack=no_ack,
             requeue_delay=requeue_delay,
-            always_requeue=always_requeue,
+            on_error=on_error,
         )
 
         defer.returnValue(ct)
@@ -642,7 +674,7 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
 
         logger.debug("cancel consuming, consumer_tag %s", consumer_tag)
 
-        cstate = self._consume_state.pop(consumer_tag, {})
+        cstate = self._consumer_state.pop(consumer_tag, {})
         ch = cstate.get('channel')
 
         if ch:
@@ -745,12 +777,13 @@ class AMQPFactory(pclient.PersistentClientFactory):
             heartbeat=None,
             prefetch_count=None,
             requeue_delay=120,
-            always_requeue=False,
+            on_error=None,
             **kwargs
     ):
         # defaults for _AMQPProtocol
+
         self.prefetch_count = prefetch_count
-        self.always_requeue = always_requeue
+        self.on_error = on_error
         self.requeue_delay = requeue_delay
 
         self._protocol_parameters = {
@@ -781,7 +814,7 @@ class AMQPFactory(pclient.PersistentClientFactory):
             schema=self.schema,
             prefetch_count=self.prefetch_count,
             requeue_delay=self.requeue_delay,
-            always_requeue=self.always_requeue,
+            on_error=self.on_error,
         )
         p.factory = self
         self._protocol_instance = p
@@ -864,7 +897,7 @@ class _BaseConsumer(service.Service):
             no_ack=False,
             deserialize=True,
             requeue_delay=None,
-            always_requeue=None,
+            on_error=None,
     ):
 
         self.callback = callback
@@ -872,7 +905,7 @@ class _BaseConsumer(service.Service):
         self.parallel = parallel
         self.no_ack = no_ack
         self.requeue_delay = requeue_delay
-        self.always_requeue = always_requeue
+        self.on_error = on_error
         self._active_callbacks = {}
         self._active_callbacks_cnt = 0
         self._consume_deferred = None
@@ -1000,7 +1033,7 @@ class _QueueConsumer(_BaseConsumer):
             parallel=self.parallel,
             no_ack=self.no_ack,
             requeue_delay=self.requeue_delay,
-            always_requeue=self.always_requeue,
+            on_error=self.on_error,
         )
 
 
@@ -1019,7 +1052,7 @@ class _ExchangeConsumer(_BaseConsumer):
             parallel=self.parallel,
             no_ack=self.no_ack,
             requeue_delay=self.requeue_delay,
-            always_requeue=self.always_requeue,
+            on_error=self.on_error,
             routing_key=self.routing_key,
         )
 
@@ -1070,7 +1103,7 @@ class AMQPService(object, pclient.PersistentClientService):
             ss.clientProtocolReady(protocol)
 
     def setupQueueConsuming(self, queue, callback, no_ack=False, parallel=0,
-                            deserialize=True, requeue_delay=120, always_requeue=None):
+                            deserialize=True, requeue_delay=None, on_error=None):
 
         logger.debug("setup queue consuming for conn %r, queue %r", self, queue)
         qc = _QueueConsumer(
@@ -1080,13 +1113,13 @@ class AMQPService(object, pclient.PersistentClientService):
             no_ack=no_ack,
             deserialize=deserialize,
             requeue_delay=requeue_delay,
-            always_requeue=always_requeue,
+            on_error=on_error,
         )
         qc.setServiceParent(self.consumer_services)
         return qc
 
-    def setupExchangeConsuming(self, exchange, callback, routing_key='', requeue_delay=120,
-                               parallel=0, deserialize=True, no_ack=False, always_requeue=None):
+    def setupExchangeConsuming(self, exchange, callback, routing_key='', requeue_delay=None,
+                               parallel=0, deserialize=True, no_ack=False, on_error=None):
 
         logger.debug("setup exchange consuming for conn %r, exch %r", self, exchange)
         qc = _ExchangeConsumer(
@@ -1097,7 +1130,7 @@ class AMQPService(object, pclient.PersistentClientService):
             no_ack=no_ack,
             parallel=parallel,
             requeue_delay=requeue_delay,
-            always_requeue=always_requeue,
+            on_error=on_error,
         )
         qc.setServiceParent(self.consumer_services)
         return qc
