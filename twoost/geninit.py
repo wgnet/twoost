@@ -105,11 +105,13 @@ class GenInit(object):
     def print(self, *args, **kwargs):
         if not self._quiet:
             print(*args, **kwargs)
+            sys.stdout.flush()
             kwargs.get('file', sys.stdout).flush()
 
     def log_debug(self, msg, *args, **kwargs):
         if self._verbose:
             print("│ ", msg % args, **kwargs)
+            sys.stdout.flush()
             kwargs.get('file', sys.stdout).flush()
 
     def log_error(self, msg, *args, **kwargs):
@@ -455,14 +457,15 @@ class GenInit(object):
         for workerid in natural_sorted(all_workes):
             res = self.command_worker_stop(
                 workerid=workerid, wait=None, kill=kill, **kwargs) and res
+
         if wait and all_workes:
             nps = list(filter(None, map(self.worker_process, all_workes)))
             self.wait_for_processes(nps, wait)
 
-        if kill:
+        active_nps = [p for p in nps if p.is_running()]
+        if kill and active_nps:
 
             if wait:
-                # no wait
                 for workerid in natural_sorted(all_workes):
                     self._maybe_kill_worker(workerid, wait=0)
                 res = self.wait_for_processes(nps, 0.1) and res
