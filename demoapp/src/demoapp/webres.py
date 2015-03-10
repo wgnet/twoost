@@ -1,5 +1,8 @@
 # coding: utf-8
 
+import time
+import random
+
 from twisted.internet import defer
 from twoost import web, timed
 
@@ -13,8 +16,15 @@ class SlowHelloWorldResource(web.Resource):
 
     @defer.inlineCallbacks
     def render_GET(self, request):
-        time = float(request.args.get('time', [1])[0])
-        yield timed.sleep(time)
-        defer.returnValue("Hello, world!")
+
+        t1 = time.time()
+
+        delay = float(request.args.get('delay', [random.random()])[0])
+        yield timed.sleep(delay)
+
+        dt = (time.time() - t1) * 1000
+
+        request.setHeader('content-type', 'text/plain')
+        defer.returnValue("date: %s\nrendered in %d ms" % (time.ctime(), dt))
 
 # TODO: add more examples

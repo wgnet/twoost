@@ -22,19 +22,19 @@ class WebAPIWorker(AppWorker):
 
     def init_app(self, app, workerid):
 
-        # do your import HERE
+        # do your imports *here*
+        from twisted.web.static import Data
         from twoost.httprpc import DumbRPCResource, XMLRPCResource
         from demoapp.webres import SlowHelloWorldResource
         from demoapp.webapi import WebAPIService
 
         # our webapi-worker hasn't direct access to DB
         # it only validates data & send it to our amqp
-        amqps = build_amqps(app)
+        amqps = build_amqps(app, ['default'])
 
         webapi_service = attach_service(app, WebAPIService(
-            queue_event_callback=amqps.makeSender(
+            queue_event_callback=amqps['default'].makeSender(
                 # routing_key_fn=lambda msg: msg['some_field'],
-                # connection='default',
                 exchange='new_event',
             ),
             # we can use various callbacks here
@@ -53,16 +53,18 @@ class WebAPIWorker(AppWorker):
         }
 
         restree = {
-            # index
-            'hello-world': SlowHelloWorldResource(),
-            'rpc': {
-                'dumbrpc': DumbRPCResource(rpc_methods),
-                'xmlrpc': XMLRPCResource(rpc_methods),
-                # TODO: add JSON-RPC ?
+            'demoapp': {
+                None: Data("twoost demoapp. <a href='/demoapp/'>Hello</a>.", 'text/html'),
+                '': SlowHelloWorldResource(),
+                'rpc': {
+                    'dumbrpc': DumbRPCResource(rpc_methods),
+                    'xmlrpc': XMLRPCResource(rpc_methods),
+                    # TODO: add JSON-RPC ?
+                },
             },
         }
 
-        build_web(app, restree, prefix='demoapp')
+        build_web(app, restree)
 
         # autodisabled unless settings.DEBUG switched on
         build_manhole(app, locals())
@@ -78,9 +80,9 @@ class StorageWorker(AppWorker):
         from demoapp.dao import DBDaoService
         from demoapp.storage import StorageService
 
-        dbs = build_dbs(app)
+        dbs = build_dbs(app, ['default'])
+        amqps = build_amqps(app, ['default'])
         memcache = build_memcache(app)
-        amqps = build_amqps(app)
 
         dao = attach_service(app, DBDaoService(
             dbs=dbs,
@@ -91,7 +93,7 @@ class StorageWorker(AppWorker):
             # links to other services, callbacks etc
         ))
 
-        amqps.setupQueueConsuming(
+        amqps['default'].setupQueueConsuming(
             queue='incoming_events',
             callback=dbw_service.process_event,
             parallel=5,  # how many messages we can process at the same time
