@@ -4,6 +4,7 @@ from __future__ import print_function, division, absolute_import
 
 import weakref
 import itertools
+import collections
 
 from StringIO import StringIO
 
@@ -305,11 +306,14 @@ class _EmptyResource(Resource):
 
 
 def _flatten_url_dict(acc, d, prefix):
-    if IResource.providedBy(d):
+    if IResource.providedBy(d) or isinstance(d, basestring):
         acc.append((prefix, d))
     else:
         for k, v in dict(d).items():
-            pp = "%s/%s" % (prefix, k) if prefix else k
+            if k is None:
+                pp = prefix
+            else:
+                pp = "%s/%s" % (prefix, k)
             _flatten_url_dict(acc, v, pp)
 
 
@@ -338,10 +342,16 @@ def buildResourceTree(resources):
         return resources
 
     logger.debug("build resorce tree...")
+    if isinstance(resources, collections.Mapping):
+        res_list = []
+        _flatten_url_dict(res_list, resources, "")
+    else:
+        res_list = list(resources)
+    res_list.sort()
 
-    res_list = []
-    _flatten_url_dict(res_list, resources, "")
-    roots = [v for k, v in res_list if k == ""]
+    roots = [v for k, v in res_list if not k]
+    assert len(roots) <= 1
+    logger.debug("resource tree is %r", res_list)
 
     if roots:
         root, = roots
@@ -353,6 +363,8 @@ def buildResourceTree(resources):
         logger.debug("path %r, resource %r", fpath, res)
         if fpath.startswith("/"):
             fpath = fpath[1:]
+        else:
+            raise AssertionError("expected leading '/'")
         _put_subresource(root, fpath.split("/"), res)
 
     return root

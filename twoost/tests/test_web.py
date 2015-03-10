@@ -189,7 +189,7 @@ class RoutingTest(TestCase):
 
     def test_only_root(self):
         res = web.Resource()
-        r = web.buildResourceTree({'': res})
+        r = web.buildResourceTree({None: res})
         self.assertIs(res, r)
         self.assertNot(r.children)
 
@@ -202,9 +202,9 @@ class RoutingTest(TestCase):
     def test_subresourecs(self):
         r1, r2, r3, r4 = self._mk_ress(4)
         r = web.buildResourceTree([
-            ("a/b", r1),
-            ("a", r2),
-            ("c/d/", r3),
+            ("/a/b", r1),
+            ("/a", r2),
+            ("/c/d/", r3),
             ("", r4),
         ])
         self.assertChild(r1, r, ['a', 'b'])
