@@ -3,7 +3,7 @@
 import crontab
 
 from twisted.internet import defer, reactor
-from twisted.application import internet, service
+from twisted.application import service
 
 from twoost import timed
 
@@ -41,22 +41,23 @@ class _PeriodicalDelayedCallService(service.Service):
         self._call = None
         self._adef = None
 
-    def _reschedule(self):
+    def _reschedule(self, now=False):
         if self._call and self._call.active():
             self._call.cancel()
         if self.running:
-            self._call = self.clock.callLater(self.next_delay(), self.start_call)
+            t = self.nextDelay()
+            self._call = self.clock.callLater(t, self.doCall)
 
-    def start_call(self):
-        self._adef = self._callable().addBoth(self.finish_call)
+    def doCall(self):
+        self._adef = self._callable().addBoth(self._finish_call)
 
-    def finish_call(self, v):
+    def _finish_call(self, v):
         self._call = None
         self._adef = None
         self._reschedule()
         return v
 
-    def next_delay(self):
+    def nextDelay(self):
         raise NotImplementedError
 
     def startService(self):
@@ -72,9 +73,9 @@ class _PeriodicalDelayedCallService(service.Service):
             self._call.cancel()
 
         if self._adef and not self._adef.called:
-            self._adef.cancel()
             try:
                 timed.timeoutDeferred(self._adef, self.cancel_timeout)
+                self._adef.cancel()
                 yield self._adef
             except defer.CancelledError:
                 logger.debug("deffered %r cancelled", self._adef)
@@ -91,7 +92,7 @@ class CrontabTimerService(_PeriodicalDelayedCallService):
         self.cronline = cronline
         self.crontab = crontab.CronTab(cronline)
 
-    def next_delay(self):
+    def nextDelay(self):
         p = self.crontab.previous()
         n = self.crontab.next()
         ct = self.clock.seconds()
@@ -105,19 +106,29 @@ class CrontabTimerService(_PeriodicalDelayedCallService):
 
 class IntervalTimerService(_PeriodicalDelayedCallService):
 
+    _first_run = True
+
     def __init__(self, interval, callable, *args, **kwargs):
         _PeriodicalDelayedCallService.__init__(self, callable, *args, **kwargs)
         self.interval = float(interval)
 
     def startService(self):
         self._expect_call_at = self.clock.seconds()
+        self._first_run = True
         return _PeriodicalDelayedCallService.startService(self)
 
-    def next_delay(self):
+    def nextDelay(self):
+
+        if self._first_run:
+            self._first_run = False
+            return 0
+
         cur_time = self.clock.seconds()
         until_next_time = (self._expect_call_at - cur_time) % self.interval
         next_time = max(self._expect_call_at + self.interval, cur_time + until_next_time)
+
         if next_time == cur_time:
             next_time += self.interval
+
         self._expect_call_at = next_time
         return next_time - cur_time

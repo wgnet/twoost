@@ -20,6 +20,7 @@ class TimeoutError(defer.CancelledError):
 
 
 def timeoutDeferred(d, timeout=120):
+    assert isinstance(d, defer.Deferred)
 
     if not timeout:
         return d
