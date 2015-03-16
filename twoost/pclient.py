@@ -17,6 +17,7 @@ from twisted.internet.error import ConnectionClosed
 from twisted.python import failure
 from twisted.application import service
 
+from twoost import health
 from twoost._misc import TheProxy
 
 import logging
@@ -68,6 +69,7 @@ class PersistentClientProtocol(protocol.Protocol):
             d.callback(self)
 
 
+@zope.interface.implementer(health.IHealthChecker)
 class PersistentClientService(service.Service):
 
     # list of proxied methods (delegate to self.protocol)
@@ -376,6 +378,12 @@ class PersistentClientService(service.Service):
         self.reconnect_delay = min(self.reconnect_initial_delay, self.reconnect_max_delay)
         self._reconnect_retries = 0
         self._scheduleDisconnect()
+
+    def checkHealth(self):
+        if self.getProtocol():
+            return True, ""
+        else:
+            return False, "reconnect in %s secs" % int(self.reconnect_delay)
 
 
 class _PClientProtocolProxy(TheProxy):
