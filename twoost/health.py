@@ -28,6 +28,7 @@ class IHealthChecker(zope.interface.Interface):
 # ---
 
 def findApplication(service):
+    logger.debug("find application for service %r", service)
     parent = service
     while parent:
         service = parent
@@ -39,8 +40,11 @@ def _flatSubservices(root, acc=None):
     if acc is None:
         acc = list()
     acc.append(root)
-    if service.IServiceCollection.providedBy(root):
-        _flatSubservices(service.IServiceCollection(root), acc)
+    sc = service.IServiceCollection(root, None)
+    if sc:
+        for ss in sc:
+            _flatSubservices(ss, acc)
+    logger.debug("root %r, subservices %r", root, acc)
     return acc
 
 
@@ -56,6 +60,7 @@ def _serviceFullName(s):
 
 def checkServicesHealth(root_srv, timeout=20):
 
+    logger.debug("check services health, root %r", root_srv)
     ssx = filter(IHealthChecker.providedBy, _flatSubservices(root_srv))
 
     def on_ok(x, s):
@@ -66,6 +71,7 @@ def checkServicesHealth(root_srv, timeout=20):
         logger.error("health check failure: %s", f.value)
         return False, _serviceFullName(s), "exc: %s" % f.value
 
+    logger.debug("check health for %d services", len(ssx))
     return defer.gatherResults(
         timed.timeoutDeferred(
             defer.maybeDeferred(IHealthChecker(s).checkHealth)
@@ -78,11 +84,11 @@ def checkServicesHealth(root_srv, timeout=20):
 
 
 def formatServicesHealth(ssh):
-    mnl = max(x[1] for x in ssh)
+    mnl = max(len(x[1]) for x in ssh) if ssh else 0
     return "\n".join(
         "{0}\t{1}\t{2}".format(
             'ok' if status else 'fail',
-            sname.ljust(mnl),
+            sname.ljust(mnl + 4),
             msg if len(msg) < 80 else msg[:77] + "..."
         )
         for status, sname, msg
@@ -109,8 +115,8 @@ class HealthCheckProtocol(protocol.Protocol):
         self.transport.loseConnection()
 
     def connectionMade(self):
-        s = self.factory.service
-        d = s.checkApplicationHealth()
+        app = self.factory.app
+        d = checkServicesHealth(app)
         d.addCallback(self.responseAppHealth)
 
 

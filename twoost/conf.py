@@ -57,16 +57,19 @@ def load_conf_yaml(fname):
 
 
 def prop_lazy(fn, *args, **kwargs):
+    assert callable(fn)
     return _prop_magic(
         lambda root_config, prop_name, prev_val_fn: fn(*args, **kwargs))
 
 
 def prop_alter(fn, *args, **kwargs):
+    assert callable(fn)
     return _prop_magic(
         lambda root_config, prop_name, prev_val_fn: fn(prev_val_fn(), *args, **kwargs))
 
 
 def prop_dynamic(fn, *args, **kwargs):
+    assert callable(fn)
     return _prop_magic(
         lambda root_config, prop_name, prev_val_fn: fn(root_config, *args, **kwargs))
 

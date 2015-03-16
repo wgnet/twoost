@@ -4,7 +4,7 @@ import os
 import socket
 import getpass
 
-from .conf import Config
+from .conf import Config, prop_lazy
 
 
 class DefaultSettings(Config):
@@ -19,12 +19,17 @@ class DefaultSettings(Config):
     RPC_PROXIES = {}
     MEMCACHE_SERVERS = {}
 
-    WEB_ENDPOINT = os.path.expandvars("unix:$HOME/run/www/$TWOOST_WORKERID.sock")
-    MANHOLE_SOCKET = os.path.expandvars("$HOME/run/manhole/$TWOOST_WORKERID.sock")
-    HEALTHCHECK_SOCKET = os.path.expandvars("$HOME/run/health/$TWOOST_WORKERID.sock")
-    HEALTHCHECK_SOCKET_MODE = 0440
+    WEB_ENDPOINT = prop_lazy(
+        lambda: os.path.expandvars("unix:$HOME/run/www/$TWOOST_WORKERID.sock"))
+    MANHOLE_SOCKET_DIR = prop_lazy(
+        lambda: os.path.expandvars("$HOME/run/manhole"))
+    HEALTHCHECK_SOCKET_DIR = prop_lazy(
+        lambda: os.path.expandvars("$HOME/run/health"))
+    HEALTHCHECK_SOCKET_MODE = 0700
 
-    EMAIL_DEFAULT_FROM = "{0}@{1}".format(getpass.getuser(), socket.gethostname())
+    EMAIL_DEFAULT_FROM = prop_lazy(
+        lambda: "{0}@{1}".format(getpass.getuser(), socket.gethostname()))
+
     EMAIL_USER = None
     EMAIL_PASSWORD = None
     EMAIL_HOST = "localhost"
@@ -34,4 +39,5 @@ class DefaultSettings(Config):
     LOGGING = {'version': 1}
     SENTRY_DSN = None
 
-    PID_DIR = os.environ.get("TWOOST_PID_DIR") or os.path.expanduser("~/run")
+    PID_DIR = prop_lazy(
+        lambda: os.environ.get("TWOOST_PID_DIR") or os.path.expanduser("~/run"))

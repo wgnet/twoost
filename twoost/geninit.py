@@ -278,6 +278,9 @@ class GenInit(object):
         self._process_cache[workerid] = p
         return p
 
+    def read_worker_health(self, workerid):
+        return None
+
     # --- commands
 
     def command_worker_start(self, workerid, **kwargs):
@@ -348,7 +351,7 @@ class GenInit(object):
         return result
 
     def command_worker_status(self, workerid, **kwargs):
-        self.log_debug("check command_status of worker %s", workerid)
+        self.log_debug("check status of worker %s", workerid)
         np = self.worker_process(workerid)
         if workerid in set(self.default_workerids):
             worker_name = workerid
@@ -523,6 +526,50 @@ class GenInit(object):
         workerid = workers[-1]
         self.command_worker_stop(workerid=workerid, **kwargs)
 
+    def command_health(self, **kwargs):
+        x = True
+        active_workerids = set(self.load_workerids_from_pidfiles())
+        for workerid in natural_sorted(active_workerids | set(self.default_workerids)):
+            x = self.command_worker_health(workerid=workerid, **kwargs) and x
+        return x
+
+    def command_worker_health(self, workerid, **kwargs):
+
+        self.log_debug("check health of worker %s", workerid)
+        np = self.worker_process(workerid)
+        if workerid in set(self.default_workerids):
+            worker_name = workerid
+        else:
+            worker_name = workerid + "*"
+
+        if np:
+            health = self.read_worker_health(workerid)
+        else:
+            health = []
+
+        if np and health:
+            x = all(x[0] for x in health)
+
+            if x:
+                self.log_info("worker %s is healthy", worker_name)
+            else:
+                self.log_info("worker %s is sick!", worker_name)
+
+            if kwargs.get('all'):
+                from twoost.health import formatServicesHealth
+                for line in formatServicesHealth(health).splitlines():
+                    self.log_info("%s", line)
+                self.log_info("")
+
+            return x
+
+        elif np:
+            self.log_info("worker %s has no health!", worker_name)
+            return False
+        else:
+            self.log_info("worker %s is down!", worker_name)
+            return False
+
     def create_parser(self):
         parser = argparse.ArgumentParser()
 
@@ -573,6 +620,10 @@ class GenInit(object):
 
         p_status = argparse.ArgumentParser(add_help=False)
 
+        p_health = argparse.ArgumentParser(add_help=False)
+        p_health.add_argument('--all', '-a', action='store_true',
+                              help="show health of all subservices")
+
         p_info = argparse.ArgumentParser(add_help=False)
         p_info.add_argument('--all', '-a', action='store_true',
                             help="show open files and ports")
@@ -587,6 +638,7 @@ class GenInit(object):
         sp.add_parser('status_bool', parents=[p_status, p_all_workers])
         sp.add_parser('restart', parents=[p_start, p_stop, p_all_workers, p_status])
         sp.add_parser('info', parents=[p_info, p_all_workers])
+        sp.add_parser('health', parents=[p_health, p_all_workers])
 
         if not self.singletone:
             sp.add_parser('worker_start', parents=[p_worker, p_start])
@@ -595,6 +647,7 @@ class GenInit(object):
             sp.add_parser('worker_status_bool', parents=[p_worker, p_status])
             sp.add_parser('worker_restart', parents=[p_worker, p_start, p_stop, p_status])
             sp.add_parser('worker_info', parents=[p_worker, p_info])
+            sp.add_parser('worker_health', parents=[p_health, p_worker])
             sp.add_parser('add_worker', parents=[p_start])
             sp.add_parser('remove_worker', parents=[p_stop])
             sp.add_parser('num_workers')

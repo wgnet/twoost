@@ -3,6 +3,7 @@
 from __future__ import print_function, division, absolute_import
 
 import os
+import socket
 
 from twisted.internet import endpoints, defer, reactor, task
 from twisted.application import internet, service
@@ -161,7 +162,8 @@ def build_manhole(app, namespace=None):
     from twoost.manhole import AnonymousShellFactory
     from twisted.application.internet import UNIXServer
 
-    socket_file = settings.MANHOLE_SOCKET
+    workerid = app.workerid
+    socket_file = os.path.join(settings.MANHOLE_SOCKET_DIR, workerid)
     mkdir_p(os.path.dirname(socket_file))
 
     namespace = dict(namespace or {})
@@ -187,10 +189,11 @@ def build_health(app):
     from twisted.application.internet import UNIXServer
 
     mode = settings.HEALTHCHECK_SOCKET_MODE
-    socket_file = settings.HEALTHCHECK_SOCKET
+    workerid = app.workerid
+    socket_file = os.path.join(settings.HEALTHCHECK_SOCKET_DIR, workerid)
     mkdir_p(os.path.dirname(socket_file))
 
-    fct = HealthCheckFactory()
+    fct = HealthCheckFactory(app)
 
     logger.debug("serve health checker on %r socket", socket_file)
     ss = UNIXServer(address=socket_file, factory=fct, mode=mode, wantPID=1)
@@ -208,6 +211,8 @@ def build_memcache(app, active_servers=None):
 # --- integration with 'geninit'
 
 class AppWorker(geninit.Worker):
+
+    healthcheck_timeout = 20
 
     @property
     def log_dir(self):
@@ -229,11 +234,40 @@ class AppWorker(geninit.Worker):
         return geninit.Worker.main(self, args)
 
     def create_app(self, workerid):
-        self.init_settings()
-        self.init_logging(workerid)
         app = service.Application(workerid)
+        app.workerid = workerid
+        self.crte_app(app, workerid)
         self.init_app(app, workerid)
         return app
+
+    def crte_app(self, app, workerid):
+        self.init_settings()
+        self.init_logging(workerid)
+        build_health(app)
+
+    def read_worker_health(self, workerid):
+
+        from twoost.health import parseServicesHealth
+        self.init_settings()
+
+        sp = os.path.join(settings.HEALTHCHECK_SOCKET_DIR, workerid)
+        if not os.path.exists(sp):
+            return
+
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.healthcheck_timeout)
+        sock.connect(sp)
+
+        bufs = []
+        while 1:
+            b = sock.recv(1024)
+            if b:
+                bufs.append(b)
+            else:
+                break
+
+        body = b"".join(bufs)
+        return parseServicesHealth(body)
 
     def init_settings(self):
         raise NotImplementedError
