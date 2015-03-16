@@ -2,11 +2,13 @@
 
 import crontab
 
+import zope.interface
+
 from twisted.internet import defer, reactor
 from twisted.application import service
 from twisted.python import log
 
-from twoost import timed
+from twoost import timed, health
 
 import logging
 logger = logging.getLogger(__name__)
@@ -17,6 +19,7 @@ __all__ = [
 ]
 
 
+@zope.interface.implementer(health.IHealthChecker)
 class _PeriodicalDelayedCallService(service.Service):
 
     cancelTimeout = 60
@@ -25,6 +28,7 @@ class _PeriodicalDelayedCallService(service.Service):
     def __init__(self, callback, *args, **kwargs):
         self.clock = reactor
         self.callback = callback
+        self._lastCallFailure = None
         self._delayedCall = None
         self._activeDeferred = None
 
@@ -40,8 +44,17 @@ class _PeriodicalDelayedCallService(service.Service):
     def doCall(self):
         assert self._activeDeferred is None
         self._activeDeferred = defer.maybeDeferred(self.callback)
+        self._activeDeferred.addCallbacks(self._clearLastFailure, self._trackLastFailure)
         self._activeDeferred.addErrback(self.handleFailure)
         self._activeDeferred.addBoth(self._finishCall)
+
+    def _trackLastFailure(self, f):
+        self._lastCallFailure = f
+        return f
+
+    def _clearLastFailure(self, x):
+        self._lastCallFailure = None
+        return x
 
     def _finishCall(self, v):
         self._delayedCall = None
@@ -74,6 +87,12 @@ class _PeriodicalDelayedCallService(service.Service):
                 logger.debug("deffered %r cancelled", activeDeferred)
             except Exception:
                 logger.exception("cancellation error")
+
+    def checkHealth(self):
+        if self._lastCallFailure:
+            return False, self._lastCallFailure
+        else:
+            return True, ""
 
 
 class CrontabTimerService(_PeriodicalDelayedCallService):
