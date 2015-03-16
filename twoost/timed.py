@@ -19,11 +19,14 @@ class TimeoutError(defer.CancelledError):
     pass
 
 
-def timeoutDeferred(d, timeout=120):
+def timeoutDeferred(d, timeout=120, clock=None):
     assert isinstance(d, defer.Deferred)
 
     if not timeout:
         return d
+
+    if clock is None:
+        clock = reactor
 
     cancelled = [False]
 
@@ -48,7 +51,7 @@ def timeoutDeferred(d, timeout=120):
     return d.addBoth(cancel_canceller).addErrback(convert_ce_to_te)
 
 
-def withTimeout(timeout):
+def withTimeout(timeout, clock=None):
 
     if not timeout:
         return lambda f: f
@@ -57,7 +60,7 @@ def withTimeout(timeout):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             d = defer.maybeDeferred(fn, *args, **kwargs)
-            return timeoutDeferred(d, timeout)
+            return timeoutDeferred(d, timeout, clock)
         return wrapper
     return decorator
 

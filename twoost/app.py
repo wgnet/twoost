@@ -9,7 +9,7 @@ from twisted.application import internet, service
 
 from twoost import log, geninit
 from twoost.conf import settings
-from twoost._misc import ignore_errors, subdict, mkdir_p
+from twoost._misc import subdict, mkdir_p
 
 import logging
 logger = logging.getLogger(__name__)
@@ -51,17 +51,18 @@ def react_app(app, main, argv=()):
     return task.react(appless_main)
 
 
-def build_timer(app, when, callback, stop_on_error=False):
-    from twoost import cron
+def build_timer(app, when, callback):
 
-    if not stop_on_error:
-        callback = ignore_errors(callback)
+    if isinstance(when, (list, tuple)):
+        assert len(when) == 5
+        when = " ".join(when)
 
     try:
         interval = float(when)
-    except ValueError:
+    except (TypeError, ValueError):
         interval = None
 
+    from twoost import cron
     logger.debug("build timer %r, callback %r", when, callback)
     if interval is not None:
         return attach_service(app, cron.IntervalTimerService(interval, callback))
