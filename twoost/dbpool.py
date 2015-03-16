@@ -3,11 +3,14 @@
 import os
 import functools
 
+import zope.interface
+
 from twisted.enterprise.adbapi import ConnectionPool
 from twisted.application import service
 from twisted.python import reflect
 
 from .dbtools import is_pure_db_operation, pure_db_operation
+from twoost import health
 
 import logging
 logger = logging.getLogger(__name__)
@@ -16,6 +19,7 @@ logger = logging.getLogger(__name__)
 __all__ = ['DatabaseService', 'make_dbpool']
 
 
+@zope.interface.implementer(health.IHealthChecker)
 class TwoostConnectionPool(ConnectionPool, service.Service):
 
     reconnect = True
@@ -88,6 +92,9 @@ class TwoostConnectionPool(ConnectionPool, service.Service):
         if new_connection:
             self.prepare_connection(conn)
         return conn
+
+    def checkHealth(self):
+        return self.runQuery("SELECT 1").addCallback(lambda _: (True, ""))
 
 
 class PGSqlConnectionPool(TwoostConnectionPool):
