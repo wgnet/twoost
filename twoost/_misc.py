@@ -78,15 +78,6 @@ class cached_property(object):
         return value
 
 
-def ignore_errors(f, logger=None):
-
-    @functools.wraps(f)
-    def wrapper(*args, **kwargs):
-        return defer.maybeDeferred(f, *args, **kwargs).addErrback(log.err)
-
-    return wrapper
-
-
 def subdict(d, keys=None):
     d = dict(d)
     if keys is None:

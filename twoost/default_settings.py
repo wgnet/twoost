@@ -21,6 +21,8 @@ class DefaultSettings(Config):
 
     WEB_ENDPOINT = os.path.expandvars("unix:$HOME/run/www/$TWOOST_WORKERID.sock")
     MANHOLE_SOCKET = os.path.expandvars("$HOME/run/manhole/$TWOOST_WORKERID.sock")
+    HEALTHCHECK_SOCKET = os.path.expandvars("$HOME/run/health/$TWOOST_WORKERID.sock")
+    HEALTHCHECK_SOCKET_MODE = 0440
 
     EMAIL_DEFAULT_FROM = "{0}@{1}".format(getpass.getuser(), socket.gethostname())
     EMAIL_USER = None

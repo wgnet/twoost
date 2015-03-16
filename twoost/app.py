@@ -181,6 +181,23 @@ def build_manhole(app, namespace=None):
     return attach_service(app, ss)
 
 
+def build_health(app):
+
+    from twoost.health import HealthCheckFactory
+    from twisted.application.internet import UNIXServer
+
+    mode = settings.HEALTHCHECK_SOCKET_MODE
+    socket_file = settings.HEALTHCHECK_SOCKET
+    mkdir_p(os.path.dirname(socket_file))
+
+    fct = HealthCheckFactory()
+
+    logger.debug("serve health checker on %r socket", socket_file)
+    ss = UNIXServer(address=socket_file, factory=fct, mode=mode, wantPID=1)
+
+    return attach_service(app, ss)
+
+
 def build_memcache(app, active_servers=None):
     from twoost import memcache
     servers = settings.MEMCACHE_SERVERS
