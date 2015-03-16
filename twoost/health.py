@@ -64,7 +64,7 @@ def checkServicesHealth(root_srv, timeout=20):
     ssx = filter(IHealthChecker.providedBy, _flatSubservices(root_srv))
 
     def on_ok(x, s):
-        status, msg = x
+        status, msg = x if x is not None else (True, "")
         return status, _serviceFullName(s), msg
 
     def on_fail(f, s):

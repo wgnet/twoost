@@ -110,16 +110,16 @@ class GenInit(object):
 
     def log_debug(self, msg, *args, **kwargs):
         if self._verbose:
-            print("│ ", msg % args, **kwargs)
+            print("│", msg % args, **kwargs)
             sys.stdout.flush()
             kwargs.get('file', sys.stdout).flush()
 
     def log_error(self, msg, *args, **kwargs):
-        print("│!", msg % args, file=sys.stderr, **kwargs)
+        print("│!", msg % args, file=sys.stderr, sep="", **kwargs)
         sys.stderr.flush()
 
     def log_info(self, msg, *args, **kwargs):
-        self.print("│ ", msg % args, **kwargs)
+            self.print("│", msg % args, **kwargs)
 
     def print_header(self):
         self.print("┌────", self.appname, "────")
@@ -247,7 +247,7 @@ class GenInit(object):
 
     def _dump_worker_output(self, sin, sout):
         for line in sin:
-            sout.write("│ ║")
+            sout.write("│║")
             sout.write(line)
 
     def _fire_worker_output_dumping(self, si, so):
@@ -700,7 +700,6 @@ class GenInit(object):
         self.log_error("there is another active geninit process")
 
     def main(self, args=None):
-        self.print_header()
 
         self.create_dirs()
         parser = self.create_parser()
@@ -713,6 +712,7 @@ class GenInit(object):
         self.log_debug("run command %r", command_name)
         command = getattr(self, 'command_' + command_name)
 
+        self.print_header()
         self._acquire_flock(lock)
         try:
             x = command(**vars(parsed_args))
