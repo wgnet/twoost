@@ -50,7 +50,7 @@ Simple rpc methods:
 
     curl --header "content-type:application/json" \
         --data '["any-string"]' \
-        'http://demoapp.local/demoapp/rpc/dumbrpc?method=echo'
+        'http://demoapp.local/demoapp/rpc/dumbrpc?method=_echo'
 
 
 Insert new items to db:

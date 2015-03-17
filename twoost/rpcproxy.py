@@ -1,11 +1,14 @@
 # coding: utf-8
 
+import uuid
+import zope.interface
+
 from twisted.internet import reactor, defer
 from twisted.application import service
 from twisted.python import reflect
 from twisted.web import client
 
-from twoost import httprpc, authhmac, timed
+from twoost import httprpc, authhmac, timed, health
 
 import logging
 logger = logging.getLogger(__name__)
@@ -56,6 +59,8 @@ class _HTTPClientProxyService(_BaseRPCService):
         _BaseRPCService.__init__(self, timeout)
         self.http_pool = http_pool
         self.proxy = proxy
+        if health.IHealthChecker.providedBy(proxy):
+            zope.interface.directlyProvides(self, health.IHealthChecker)
 
     def callRemote(self, method, *args):
         return self.proxy.callRemote(method, *args)
@@ -65,6 +70,9 @@ class _HTTPClientProxyService(_BaseRPCService):
         logger.debug("close http pool %r", self.http_pool)
         yield defer.maybeDeferred(self.http_pool.closeCachedConnections)
         yield defer.maybeDeferred(service.Service.stopService, self)
+
+    def checkHealth(self):
+        return self.proxy.checkHealth()
 
 
 def make_http_pool_and_agent(params):

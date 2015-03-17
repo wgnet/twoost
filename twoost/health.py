@@ -3,6 +3,7 @@
 import zope.interface
 
 from twisted.internet import defer, protocol
+from twisted.python import failure
 from twisted.application import service
 
 from twoost import timed
@@ -67,6 +68,10 @@ def checkServicesHealth(root_srv, timeout=20):
         status, msg = x if x is not None else (True, "")
         return status, _serviceFullName(s), msg
 
+    def trap_ni(f, s):
+        f.trap(NotImplementedError)
+        logger.debug("service %s not implement health checking", s)
+
     def on_fail(f, s):
         logger.error("health check failure: %s", f.value)
         return False, _serviceFullName(s), "exc: %s" % f.value
@@ -76,10 +81,13 @@ def checkServicesHealth(root_srv, timeout=20):
         timed.timeoutDeferred(
             defer.maybeDeferred(IHealthChecker(s).checkHealth)
                 .addCallback(on_ok, s)
+                .addErrback(trap_ni, s)
                 .addErrback(on_fail, s),
             timeout=timeout,
         )
         for s in ssx
+    ).addCallback(
+        lambda x: list(filter(None, x)),
     )
 
 

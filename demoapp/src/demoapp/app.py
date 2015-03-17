@@ -48,7 +48,6 @@ class WebAPIWorker(AppWorker):
         # RPC fn = any function, which CAN return Deferred
         rpc_methods = {
             'version': lambda: __version__,
-            'echo': lambda x: x,
             'new_event': webapi_service.new_event,
         }
 

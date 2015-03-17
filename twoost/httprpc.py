@@ -6,6 +6,7 @@ import json
 import cgi
 import xmlrpclib
 import base64
+import uuid
 
 import zope.interface
 
@@ -14,7 +15,7 @@ from twisted.web import client, xmlrpc
 from twisted.internet import defer, reactor
 from twisted.python import reflect
 
-from twoost import web
+from twoost import web, health
 
 
 import logging
@@ -79,9 +80,13 @@ class HttpRPCError(Exception):
 
 class DumbRPCResource(web.LeafResourceMixin, web.Resource):
 
-    def __init__(self, methods=None):
+    def __init__(self, methods=None, enable_echo=True):
+
         web.Resource.__init__(self)
         self._methods = dict(methods or {})
+
+        if enable_echo:
+            self.dumbrpc__echo = lambda x: x
 
     def render_GET(self, request):
         return "methods: " + "\n".join(self.listProcedures())
@@ -143,11 +148,13 @@ class DumbRPCResource(web.LeafResourceMixin, web.Resource):
         defer.returnValue(resp_body)
 
 
+@zope.interface.implementer(health.IHealthChecker)
 class DumbRPCProxy(object):
 
-    def __init__(self, url, agent=None):
+    def __init__(self, url, agent=None, health_check=True):
         assert url
         self.url = url
+        self.health_check = health_check
         self.agent = agent or client.Agent(reactor)
 
     @defer.inlineCallbacks
@@ -178,14 +185,27 @@ class DumbRPCProxy(object):
         response = json.loads(resp_body)
         defer.returnValue(response)
 
+    @defer.inlineCallbacks
+    def checkHealth(self):
+        if not self.health_check:
+            raise NotImplementedError
+        token = uuid.uuid4().hex
+        yield self.callRemote('_echo', token)
+
 
 # --- xml-rpc
 
 class XMLRPCResource(xmlrpc.XMLRPC):
 
-    def __init__(self, methods=None, allowNone=True, useDateTime=False):
-        xmlrpc.XMLRPC.__init__(self, allowNone=True, useDateTime=False)
+    render_HEAD = None
+
+    def __init__(self, methods=None, enable_echo=True, allow_none=True, use_datetime=False):
+
+        xmlrpc.XMLRPC.__init__(self, allowNone=allow_none, useDateTime=use_datetime)
         self._methods = methods or {}
+
+        if enable_echo:
+            self.xmlrpc__echo = lambda x: x
 
     def lookupProcedure(self, method):
         if method in self._methods:
@@ -200,11 +220,18 @@ class XMLRPCResource(xmlrpc.XMLRPC):
         return sorted(a | b)
 
 
+@zope.interface.implementer(health.IHealthChecker)
 class XMLRPCProxy(object):
 
-    def __init__(self, url, agent=None, xmlrpclib_use_datetime=False, xmlrpclib_allow_none=True):
+    def __init__(
+            self, url, agent=None,
+            health_check=True,
+            xmlrpclib_use_datetime=False,
+            xmlrpclib_allow_none=True):
+
         self.url = url
         self.agent = agent or client.Agent(reactor)
+        self.health_check = health_check
         self.xmlrpclib_allow_none = xmlrpclib_allow_none
         self.xmlrpclib_use_datetime = xmlrpclib_use_datetime
 
@@ -237,3 +264,10 @@ class XMLRPCProxy(object):
 
         response = xmlrpclib.loads(resp_body, use_datetime=self.xmlrpclib_use_datetime)
         defer.returnValue(response[0][0])
+
+    @defer.inlineCallbacks
+    def checkHealth(self):
+        if not self.health_check:
+            raise NotImplementedError
+        token = uuid.uuid4().hex
+        yield self.callRemote('_echo', token)
