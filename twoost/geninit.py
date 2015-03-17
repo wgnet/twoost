@@ -326,7 +326,7 @@ class GenInit(object):
 
         np = self.worker_process(workerid)
         if not np or not np.is_running():
-            self.log_error("worker %s is already down!", workerid)
+            self.log_info("worker %s is already down!", workerid)
             return False
 
         children = np.children()
@@ -346,7 +346,7 @@ class GenInit(object):
         if not np.is_running():
             for c in children:
                 if c.is_running():
-                    self.log_error("! child process still alive (pid %s)", c.pid)
+                    self.log_error("child process still alive (pid %s)", c.pid)
 
         return result
 
@@ -533,36 +533,31 @@ class GenInit(object):
             x = self.command_worker_health(workerid=workerid, **kwargs) and x
         return x
 
+    def _print_worker_health(self, worker_name, all_ok, health, all=False, **kwargs):
+        from twoost.health import formatServicesHealth
+
+        if all_ok:
+            self.log_info("worker %s is healthy", worker_name)
+        else:
+            self.log_error("worker %s is sick", worker_name)
+
+        vis_health = list(filter(lambda x: not x[0] or all, health))
+        if vis_health:
+            for line in formatServicesHealth(vis_health).splitlines():
+                self.log_info("%s", line)
+            self.log_info("")
+
     def command_worker_health(self, workerid, **kwargs):
 
         self.log_debug("check health of worker %s", workerid)
         np = self.worker_process(workerid)
-        if workerid in set(self.default_workerids):
-            worker_name = workerid
-        else:
-            worker_name = workerid + "*"
-
-        if np:
-            health = self.read_worker_health(workerid)
-        else:
-            health = []
+        worker_name = workerid if workerid in set(self.default_workerids) else workerid + "*"
+        health = self.read_worker_health(workerid) if np else []
 
         if np and health:
-            x = all(x[0] for x in health)
-
-            if x:
-                self.log_info("worker %s is healthy", worker_name)
-            else:
-                self.log_info("worker %s is sick!", worker_name)
-
-            if kwargs.get('all'):
-                from twoost.health import formatServicesHealth
-                for line in formatServicesHealth(health).splitlines():
-                    self.log_info("%s", line)
-                self.log_info("")
-
-            return x
-
+            all_ok = all(x[0] for x in health)
+            self._print_worker_health(worker_name, all_ok, health, **kwargs)
+            return all_ok
         elif np:
             self.log_info("worker %s has no health!", worker_name)
             return False

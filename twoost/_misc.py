@@ -4,14 +4,10 @@ import re
 import os
 import copy
 import errno
-import functools
+import socket
 import itertools
 import collections
-
 import zope.interface
-
-from twisted.python import log
-from twisted.internet import defer
 
 
 class TheProxy(object):
@@ -58,26 +54,6 @@ def required_attr(self):
     raise NotImplementedError
 
 
-class cached_property(object):
-
-    __miss = object()
-
-    def __init__(self, func, name=None, doc=None):
-        self.__name__ = name or func.__name__
-        self.__module__ = func.__module__
-        self.__doc__ = doc or func.__doc__
-        self.func = func
-
-    def __get__(self, obj, type=None):
-        if obj is None:
-            return self
-        value = obj.__dict__.get(self.__name__, self.__miss)
-        if value is self.__miss:
-            value = self.func(obj)
-            obj.__dict__[self.__name__] = value
-        return value
-
-
 def subdict(d, keys=None):
     d = dict(d)
     if keys is None:
@@ -104,6 +80,26 @@ def mkdir_p(path):
             pass
         else:
             raise
+
+
+def slurp_unix_socket(sp, timeout=None):
+
+    if not os.path.exists(sp):
+        return
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    sock.connect(sp)
+
+    bufs = []
+    while 1:
+        b = sock.recv(1024)
+        if b:
+            bufs.append(b)
+        else:
+            break
+
+    return b"".join(bufs)
 
 
 def dd_merge(a, b):
@@ -139,4 +135,3 @@ def dd_merge(a, b):
 
     else:
         return b
-

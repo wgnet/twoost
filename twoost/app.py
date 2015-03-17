@@ -3,12 +3,11 @@
 from __future__ import print_function, division, absolute_import
 
 import os
-import socket
 
 from twisted.internet import endpoints, defer, reactor, task
 from twisted.application import internet, service
 
-from twoost import log, geninit
+from twoost import log, geninit, _misc
 from twoost.conf import settings
 from twoost._misc import subdict, mkdir_p
 
@@ -19,14 +18,16 @@ logger = logging.getLogger(__name__)
 __all__ = [
     'attach_service',
     'react_app',
-    'build_dbs',
-    'build_amqps',
-    'build_web',
     'build_timer',
-    'build_manhole',
+    'build_dbs',
+    'build_web',
+    'build_amqps',
     'build_rpcps',
-    'build_server',
     'build_memcache',
+    'build_manhole',
+    'build_health',
+    'build_server',
+    'build_client',
     'AppWorker',
 ]
 
@@ -80,32 +81,11 @@ def build_server(app, factory, endpoint):
     return attach_service(app, ss)
 
 
-class _StreamClientEndpointService(internet._VolatileDataService):
-
-    _connection = None
-
-    def __init__(self, client_factory, endpoint):
-        self.client_factory = client_factory
-        self.endpoint = self.endpoint
-
-    def startService(self):
-        internet._VolatileDataService.startService(self)
-        self._connection = self._getConnection()
-
-    def stopService(self):
-        internet._VolatileDataService.stopService(self)
-        if self._connection is not None:
-            self._connection.disconnect()
-            del self._connection
-
-    def _getConnection(self):
-        return self.endpoint.connect(self.client_factory)
-
-
-def build_client(app, client_factory, endpoint):
+def build_client(app, client_factory, endpoint, params=None):
+    from twoost import pclient
     logger.debug("connect %s to %s", client_factory, endpoint)
     ept = endpoints.clientFromString(reactor, endpoint)
-    ss = _StreamClientEndpointService(ept, client_factory)
+    ss = pclient.PersistentClientService(ept, client_factory, **(params or {}))
     return attach_service(app, ss)
 
 
@@ -246,27 +226,10 @@ class AppWorker(geninit.Worker):
         build_health(app)
 
     def read_worker_health(self, workerid):
-
         from twoost.health import parseServicesHealth
         self.init_settings()
-
         sp = os.path.join(settings.HEALTHCHECK_SOCKET_DIR, workerid)
-        if not os.path.exists(sp):
-            return
-
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(self.healthcheck_timeout)
-        sock.connect(sp)
-
-        bufs = []
-        while 1:
-            b = sock.recv(1024)
-            if b:
-                bufs.append(b)
-            else:
-                break
-
-        body = b"".join(bufs)
+        body = _misc.slurp_unix_socket(sp)
         return parseServicesHealth(body)
 
     def init_settings(self):
