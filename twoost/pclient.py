@@ -380,10 +380,8 @@ class PersistentClientService(service.Service):
         self._scheduleDisconnect()
 
     def checkHealth(self):
-        if self.getProtocol():
-            return True, ""
-        else:
-            return False, "reconnect in %s secs" % int(self.reconnect_delay)
+        if not self.getProtocol():
+            raise Exception("reconnect in %s secs" % int(self.reconnect_delay))
 
 
 class _PClientProtocolProxy(TheProxy):

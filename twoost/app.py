@@ -225,11 +225,11 @@ class AppWorker(geninit.Worker):
         self.init_logging(workerid)
         build_health(app)
 
-    def read_worker_health(self, workerid):
+    def read_worker_health(self, workerid, timeout=10):
         from twoost.health import parseServicesHealth
         self.init_settings()
         sp = os.path.join(settings.HEALTHCHECK_SOCKET_DIR, workerid)
-        body = _misc.slurp_unix_socket(sp)
+        body = _misc.slurp_unix_socket(sp, timeout=timeout)
         return parseServicesHealth(body)
 
     def init_settings(self):

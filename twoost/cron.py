@@ -90,9 +90,7 @@ class _PeriodicalDelayedCallService(service.Service):
 
     def checkHealth(self):
         if self._lastCallFailure:
-            return False, self._lastCallFailure
-        else:
-            return True, ""
+            self._lastCallFailure.raiseException()
 
 
 class CrontabTimerService(_PeriodicalDelayedCallService):

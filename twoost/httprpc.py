@@ -185,12 +185,11 @@ class DumbRPCProxy(object):
         response = json.loads(resp_body)
         defer.returnValue(response)
 
-    @defer.inlineCallbacks
     def checkHealth(self):
         if not self.health_check:
             raise NotImplementedError
         token = uuid.uuid4().hex
-        yield self.callRemote('_echo', token)
+        return self.callRemote('_echo', token).addCallback(lambda _: "")
 
 
 # --- xml-rpc
@@ -265,9 +264,8 @@ class XMLRPCProxy(object):
         response = xmlrpclib.loads(resp_body, use_datetime=self.xmlrpclib_use_datetime)
         defer.returnValue(response[0][0])
 
-    @defer.inlineCallbacks
     def checkHealth(self):
         if not self.health_check:
             raise NotImplementedError
         token = uuid.uuid4().hex
-        yield self.callRemote('_echo', token)
+        return self.callRemote('_echo', token).addCallback(lambda _: "")

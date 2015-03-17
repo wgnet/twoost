@@ -278,7 +278,7 @@ class GenInit(object):
         self._process_cache[workerid] = p
         return p
 
-    def read_worker_health(self, workerid):
+    def read_worker_health(self, workerid, timeout=10):
         return None
 
     # --- commands
@@ -547,12 +547,12 @@ class GenInit(object):
                 self.log_info("%s", line)
             self.log_info("")
 
-    def command_worker_health(self, workerid, **kwargs):
+    def command_worker_health(self, workerid, wait=10, **kwargs):
 
         self.log_debug("check health of worker %s", workerid)
         np = self.worker_process(workerid)
         worker_name = workerid if workerid in set(self.default_workerids) else workerid + "*"
-        health = self.read_worker_health(workerid) if np else []
+        health = self.read_worker_health(workerid, timeout=wait) if np else []
 
         if np and health:
             all_ok = all(x[0] for x in health)
@@ -618,6 +618,8 @@ class GenInit(object):
         p_health = argparse.ArgumentParser(add_help=False)
         p_health.add_argument('--all', '-a', action='store_true',
                               help="show health of all subservices")
+        p_health.add_argument('--wait', '-w', type=float, dest='wait',
+                              default=10, help="wait for health")
 
         p_info = argparse.ArgumentParser(add_help=False)
         p_info.add_argument('--all', '-a', action='store_true',

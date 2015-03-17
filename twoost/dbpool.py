@@ -94,7 +94,7 @@ class TwoostConnectionPool(ConnectionPool, service.Service):
         return conn
 
     def checkHealth(self):
-        return self.runQuery("SELECT 1").addCallback(lambda _: (True, ""))
+        return self.runQuery("SELECT 1").addCallback(lambda _: "")
 
 
 class PGSqlConnectionPool(TwoostConnectionPool):

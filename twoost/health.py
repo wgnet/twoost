@@ -23,7 +23,7 @@ class IHealthChecker(zope.interface.Interface):
     name = zope.interface.Attribute("service name")
 
     def checkHealth():
-        "Check health of subsystem. Returns tuple `(bool, str)`"
+        "Check health of subsystem. Raises exception or return comment string"
 
 
 # ---
@@ -65,8 +65,7 @@ def checkServicesHealth(root_srv, timeout=20):
     ssx = filter(IHealthChecker.providedBy, _flatSubservices(root_srv))
 
     def on_ok(x, s):
-        status, msg = x if x is not None else (True, "")
-        return status, _serviceFullName(s), msg
+        return True, _serviceFullName(s), str(x or "")
 
     def trap_ni(f, s):
         f.trap(NotImplementedError)
