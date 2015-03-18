@@ -1,6 +1,5 @@
 # coding: utf-8
 
-import uuid
 import zope.interface
 
 from twisted.internet import reactor, defer

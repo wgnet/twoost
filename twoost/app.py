@@ -50,7 +50,7 @@ def react_app(app, main, argv=()):
         finally:
             yield defer.maybeDeferred(service.IService(app).stopService)
 
-    return task.react(appless_main)
+    task.react(appless_main)
 
 
 def build_timer(app, when, callback):

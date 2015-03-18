@@ -3,7 +3,6 @@
 import zope.interface
 
 from twisted.internet import defer, protocol
-from twisted.python import failure
 from twisted.application import service
 
 from twoost import timed

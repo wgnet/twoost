@@ -42,7 +42,7 @@ def main(args):
     dbs = build_dbs(app)
     dao = attach_service(app, DBDaoService(dbs=dbs))
 
-    return react_app(app, print_events, (opts, dao))
+    react_app(app, print_events, (opts, dao))
 
 
 if __name__ == '__main__':
