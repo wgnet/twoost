@@ -194,19 +194,29 @@ class _SchemaBuilderProxy(components.proxyForInterface(IAMQPSchemaBuilder)):
 class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol):
 
     ON_ERROR_STRATEGIES = (
-        'requeue_once',          # requeue reject only redelivered messages
+        'requeue_once',     # requeue reject only redelivered messages
         'requeue_forever',  # requeue *all* messages to same queue inf times
         'reject',           # reject all messages (with delay `requeue_delay`)
         'requeue_hold',     # hold only *redelivered* messages until reconnect
         'do_nothing',       # do nothing - hold *all* messages until reconnect
     )
+
+    # strategy_name => (reque/reject on first error, requeue/reject on second error)
+    _on_error_strategy_alg = {
+        'requeue_once': (True, False),
+        'requeue_forever': (True, True),
+        'reject': (False, None),
+        'requeue_hold': (True, None),
+        'do_nothing': (None, None),
+    }
+
     __consumer_tag_cnt = 0
 
     def __init__(
             self,
             parameters,
             schema=None,
-            on_error='requeue',
+            on_error='requeue_once',
             prefetch_count=None,
             requeue_delay=None,
             requeue_max_count=None,
@@ -509,51 +519,34 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
             logger.debug("no consumer state for ct %r - skip msg failure", consumer_tag)
             return
 
-        rej_type = cstate.get('on_error') or self.on_error
+        on_error_strategy = cstate.get('on_error') or self.on_error
+        on_error_requeue = self._on_error_strategy_alg[on_error_strategy][int(redelivered)]
 
         rej_tasks_count = len(self._delayed_requeue_tasks.get(consumer_tag, ()))
         too_many_rejs = rej_tasks_count > self.requeue_max_count
 
-        need_requeue = (
-            rej_type == 'requeue_forever'
-            or (rej_type == 'requeue_once' and not redelivered)
-            or (rej_type == 'requeue_hold' and not redelivered)
-        )
-        need_reject = rej_type == 'reject' or (rej_type == 'requeue_once' and redelivered)
-
-        # TODO: log exception
-
-        if rej_type == 'do_nothing':
-            logger.debug("eat message failure: %r", msg)
+        if on_error_requeue is None:
+            logger.debug("eat message failure, dtag %r, msg %r", delivery_tag, msg)
             return
 
-        elif redelivered and rej_type == 'requeue_hold':
-            logger.debug("message %r already has `redelivered` bit, "
-                         "hold it (don't nack nor ack)", delivery_tag)
-            return
-
-        elif need_reject and too_many_rejs:
+        elif not on_error_requeue and too_many_rejs:
             logger.error("reject message without delay: %r", msg)
             ch.basic_reject(delivery_tag, requeue=False)
 
-        elif need_requeue and too_many_rejs:
+        elif on_error_requeue and too_many_rejs:
             logger.error("requeue message without delay: %r", msg)
             ch.basic_reject(delivery_tag, requeue=True)
 
-        elif too_many_rejs and rej_type == 'default':
-            logger.error("requeue message without delay: %r", msg)
-            ch.basic_reject(delivery_tag, requeue=True)
-
-        elif need_reject or need_requeue:
+        else:
             msg_requeue_delay = cstate.get('requeue_delay') or self.requeue_delay
-
-            logger.debug("schedule requeue for dt %r", delivery_tag)
+            
+            logger.debug("schedule reject/requeue for dt %r", delivery_tag)
             cstate = self._consumer_state.get(consumer_tag)
 
             if msg_requeue_delay:
                 def reject_message():
                     logger.debug("reject/requeue message, dt %r", delivery_tag)
-                    ch.basic_reject(delivery_tag, requeue=need_requeue)
+                    ch.basic_reject(delivery_tag, requeue=on_error_requeue)
                     m = self._delayed_requeue_tasks.get(consumer_tag)
                     if m is not None:
                         m.pop(delivery_tag, None)
@@ -568,10 +561,7 @@ class _AMQPProtocol(TwistedProtocolConnection, pclient.PersistentClientProtocol)
 
             else:
                 logger.debug("reject message, dt %r", delivery_tag)
-                ch.basic_reject(delivery_tag, requeue=True)
-
-        else:
-            logger.error("unknown reject type %r", rej_type)
+                ch.basic_reject(delivery_tag, requeue=on_error_requeue)
 
     def _generateConsumerTag(self):
         type(self).__consumer_tag_cnt += 1
