@@ -13,7 +13,6 @@ setup(
     name='twoost',
     version=twoost.__version__,
     author="a_zhlobich",
-    author_email="a_zhlobich@wargaming.net",
     packages=['twoost'],
     platforms=['Independant'],
     classifiers=[
