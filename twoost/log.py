@@ -305,7 +305,16 @@ class AdminEmailHandler(logging.Handler):
         return formatted_subject[:989]
 
 
-if raven:
+if raven and hasattr(raven.transport, 'BaseUDPTransport'):
+
+    # TODO: remove in 0.4
+
+    import warnings
+    warnings.warn(
+        "The UDP server has been removed from Sentry since v7.0. "
+        "Threaded/async models or a buffer proxy are the preferred replacement.",
+        DeprecationWarning,
+    )
 
     # `raven.transport.twisted.TwistedUDPTransport` is broken!
     class TwistedUDPTransport(raven.transport.BaseUDPTransport):
